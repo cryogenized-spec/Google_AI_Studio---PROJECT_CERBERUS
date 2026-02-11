@@ -1,0 +1,5 @@
+{
+  "name": "Project_Cerberus",
+  "description": "A private, immersive roleplay chat application featuring Ysaraith, a succubus entity. Features persistent state, multi-threading, and dynamic room contexts.",
+  "requestFramePermissions": []
+}

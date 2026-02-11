@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Project_Cerberus // Ysaraith</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            colors: {
+              cerberus: {
+                900: '#1a0505',
+                800: '#2d0a0a',
+                700: '#4a0e0e',
+                600: '#7f1d1d',
+                500: '#9b2c2c',
+                accent: '#d4af37',
+                void: '#0a0a0c',
+              }
+            },
+            fontFamily: {
+              sans: ['Inter', 'sans-serif'],
+              serif: ['Cinzel', 'Playfair Display', 'serif'],
+              mono: ['JetBrains Mono', 'monospace'],
+              script: ['Pinyon Script', 'cursive'],
+              playfair: ['Playfair Display', 'serif'],
+            },
+          },
+        },
+      }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Inter:wght@300;400;500;600&family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Pinyon+Script&display=swap" rel="stylesheet">
+    <style>
+      /* Custom Scrollbar for Webkit */
+      ::-webkit-scrollbar {
+        width: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #0a0a0c;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #2d0a0a;
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #4a0e0e;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "lucide-react": "https://esm.sh/lucide-react@^0.563.0",
+    "@google/genai": "https://esm.sh/@google/genai@^1.40.0",
+    "react/": "https://esm.sh/react@^19.2.4/",
+    "react": "https://esm.sh/react@^19.2.4",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "react-markdown": "https://esm.sh/react-markdown@^10.1.0",
+    "uuid": "https://esm.sh/uuid@^13.0.0",
+    "firebase/app": "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js",
+    "firebase/firestore": "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js",
+    "firebase/auth": "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js",
+    "firebase/": "https://esm.sh/firebase@^12.9.0/"
+  }
+}
+</script>
+</head>
+  <body class="bg-cerberus-void text-gray-300 font-sans antialiased overflow-hidden">
+    <div id="root"></div>
+  </body>
+</html>

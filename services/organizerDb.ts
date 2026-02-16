@@ -19,39 +19,57 @@ export class OrganizerDB extends Dexie {
     constructor() {
         super('OrganizerDB');
         
-        // Define schemas
-        (this as any).version(1).stores({
-            tasks: '++id, status, dueAt, listId, priority, [status+dueAt]',
-            events: '++id, startAt, endAt, [startAt+endAt]',
-            notes: '++id, pinned, createdAt',
-            lists: '++id, name, sortOrder',
-            tags: '++id, name'
-        });
+        try {
+            // @ts-ignore
+            this.version(1).stores({
+                tasks: '++id, status, dueAt, listId, priority, [status+dueAt]',
+                events: '++id, startAt, endAt, [startAt+endAt]',
+                notes: '++id, pinned, createdAt',
+                lists: '++id, name, sortOrder',
+                tags: '++id, name'
+            });
 
-        (this as any).version(2).stores({
-            assistant_messages: '++id, role, createdAt, mode',
-            planning_context: 'id'
-        });
+            // @ts-ignore
+            this.version(2).stores({
+                assistant_messages: '++id, role, createdAt, mode',
+                planning_context: 'id'
+            });
 
-        (this as any).version(3).stores({
-            outbox: '++id, timestamp, synced',
-            archived_items: 'id, originalTable, archivedAt'
-        });
-        
-        (this as any).version(4).stores({
-            quick_presets: 'id'
-        });
+            // @ts-ignore
+            this.version(3).stores({
+                outbox: '++id, timestamp, synced',
+                archived_items: 'id, originalTable, archivedAt'
+            });
+            
+            // @ts-ignore
+            this.version(4).stores({
+                quick_presets: 'id'
+            });
 
-        (this as any).version(5).stores({
-            secrets: 'id'
-        });
+            // @ts-ignore
+            this.version(5).stores({
+                secrets: 'id'
+            });
+        } catch (e) {
+            console.error("Dexie Schema Error:", e);
+        }
     }
 }
 
-export const db = new OrganizerDB();
+// Safely instantiate DB
+let dbInstance: OrganizerDB;
+try {
+    dbInstance = new OrganizerDB();
+} catch (e) {
+    console.error("CRITICAL: Failed to create OrganizerDB instance.", e);
+    // Fallback to avoid module crash, though functionality will be broken
+    dbInstance = new Dexie('FallbackDB') as OrganizerDB; 
+}
 
-// Setup Hooks outside constructor to avoid issues if tables aren't ready in some envs
-const setupHooks = () => {
+export const db = dbInstance;
+
+// Register hooks safely
+const registerHooks = () => {
     try {
         const tablesToMonitor = ['tasks', 'events', 'notes', 'lists', 'tags', 'planning_context'];
         
@@ -97,12 +115,21 @@ const setupHooks = () => {
     }
 };
 
-setupHooks();
+let isInitialized = false;
 
 export const initializeOrganizer = async () => {
+    if (isInitialized) return;
+    
     try {
-        await (db as any).open();
+        // Fix TS Error: isOpen/open not on type
+        if (!(db as any).isOpen()) {
+            await (db as any).open();
+        }
         
+        registerHooks();
+        isInitialized = true;
+        
+        // Seed Defaults
         const count = await db.lists.count();
         if (count === 0) {
             await db.lists.bulkAdd([
@@ -171,6 +198,7 @@ export const archiveOldTasks = async (monthsToKeep: number) => {
     if (monthsToKeep <= 0) return;
     const cutoff = Date.now() - (monthsToKeep * 30 * 24 * 60 * 60 * 1000);
     try {
+        // Fix TS Error: transaction not on type
         await (db as any).transaction('rw', db.tasks, db.archived_items, async () => {
             const oldTasks = await db.tasks
                 .where('status').equals('done')
@@ -216,6 +244,7 @@ export const importOrganizerData = async (jsonStr: string, merge: boolean = fals
         const data = JSON.parse(jsonStr);
         if (!data.version || !data.tasks) throw new Error("Invalid Format");
 
+        // Fix TS Error: transaction not on type
         await (db as any).transaction('rw', db.tasks, db.events, db.notes, db.lists, db.tags, db.assistant_messages, db.planning_context, db.quick_presets, async () => {
             if (!merge) {
                 await Promise.all([

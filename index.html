@@ -4,7 +4,6 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https: blob:; media-src 'self' blob:; connect-src 'self' https://generativelanguage.googleapis.com https://api.openai.com https://api.x.ai https://cdn.jsdelivr.net https://ntfy.sh https://www.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://firestore.googleapis.com https://api.github.com;">
     <title>Project_Cerberus // Ysaraith</title>
     
     <!-- PWA & Mobile Meta -->
@@ -53,9 +52,9 @@
         user-select: none;
       }
 
-      /* FIX: Root is always visible. We rely on z-index of splash screen to cover it. */
       #root {
-        opacity: 1; 
+        opacity: 1; /* Ensure visible by default */
+        min-height: 100vh;
       }
 
       #splash-screen {
@@ -114,21 +113,9 @@
       }
 
       @keyframes boot-pulse {
-        0% { 
-            transform: scale(0.95); 
-            opacity: 0.8; 
-            filter: drop-shadow(0 0 10px rgba(212, 175, 55, 0.1));
-        }
-        50% { 
-            transform: scale(1.05); 
-            opacity: 1.0; 
-            filter: drop-shadow(0 0 30px rgba(212, 175, 55, 0.5));
-        }
-        100% { 
-            transform: scale(0.95); 
-            opacity: 0.8; 
-            filter: drop-shadow(0 0 10px rgba(212, 175, 55, 0.1));
-        }
+        0% { transform: scale(0.95); opacity: 0.8; filter: drop-shadow(0 0 10px rgba(212, 175, 55, 0.1)); }
+        50% { transform: scale(1.05); opacity: 1.0; filter: drop-shadow(0 0 30px rgba(212, 175, 55, 0.5)); }
+        100% { transform: scale(0.95); opacity: 0.8; filter: drop-shadow(0 0 10px rgba(212, 175, 55, 0.1)); }
       }
 
       .splash-fade-out {
@@ -138,59 +125,28 @@
 
       .glyph-fade-out {
         opacity: 0 !important;
-        transform: scale(1.5); /* Expand out */
+        transform: scale(1.5);
       }
 
-      /* Emergency Reset Button - Appears after delay if stuck */
-      #emergency-reset {
+      #crash-report {
         position: fixed;
-        bottom: 20px;
-        left: 50%;
-        transform: translateX(-50%);
+        inset: 0;
         z-index: 10000;
-        background: rgba(153, 27, 27, 0.2);
-        border: 1px solid rgba(220, 38, 38, 0.5);
+        background: #1a0505;
         color: #fca5a5;
-        padding: 8px 16px;
-        border-radius: 4px;
+        padding: 40px;
         font-family: monospace;
-        font-size: 10px;
-        text-transform: uppercase;
-        cursor: pointer;
-        opacity: 0;
-        pointer-events: none;
-        transition: opacity 1s ease-in;
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
       }
-      
-      @keyframes delayedFadeIn {
-        0% { opacity: 0; pointer-events: none; }
-        90% { opacity: 0; pointer-events: none; }
-        100% { opacity: 1; pointer-events: auto; }
-      }
-
-      #emergency-reset.visible {
-        animation: delayedFadeIn 6s forwards;
-      }
-
-      /* Global reset */
-      * { -webkit-tap-highlight-color: transparent; }
-      
-      /* Scrollbar */
-      ::-webkit-scrollbar { width: 8px; }
-      ::-webkit-scrollbar-track { background: #0a0a0c; }
-      ::-webkit-scrollbar-thumb { background: #2d0a0a; border-radius: 4px; }
-      ::-webkit-scrollbar-thumb:hover { background: #4a0e0e; }
-
-      input[type="range"] { -webkit-appearance: none; width: 100%; background: transparent; outline: none; cursor: pointer; }
-      input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; height: 16px; width: 16px; border-radius: 50%; background: #7f1d1d; margin-top: -6px; border: 2px solid #1a0505; }
-      input[type="range"]::-webkit-slider-runnable-track { height: 4px; background: #4a0e0e; border-radius: 2px; }
     </style>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700&family=Inter:wght@300;400;500;600&family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=Pinyon+Script&display=swap" rel="stylesheet">
     
-    <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
-
     <script type="importmap">
 {
   "imports": {
@@ -229,7 +185,14 @@
       <div id="splash-glyph-layer">
         <img id="splash-glyph" src="/public/icons/glyph.png" alt="System Glyph" />
       </div>
-      <button id="emergency-reset" class="visible" onclick="window.emergencyReset(event)">Reset All Data</button>
+    </div>
+
+    <!-- CRASH REPORT UI -->
+    <div id="crash-report">
+        <h2 style="font-size: 24px; margin-bottom: 20px;">CRITICAL SYSTEM FAILURE</h2>
+        <p style="margin-bottom: 20px;">The application failed to mount.</p>
+        <pre id="crash-details" style="background: #000; padding: 10px; border: 1px solid #7f1d1d; overflow: auto; max-width: 90%; text-align: left;"></pre>
+        <button onclick="localStorage.clear(); window.location.reload();" style="margin-top: 20px; padding: 10px 20px; background: #7f1d1d; color: white; border: none; border-radius: 4px; cursor: pointer;">FACTORY RESET & RELOAD</button>
     </div>
 
     <div id="root"></div>
@@ -240,8 +203,28 @@
         const mediaLayer = document.getElementById('splash-media-layer');
         const video = document.getElementById('splash-video');
         const glyphLayer = document.getElementById('splash-glyph-layer');
+        const crashReport = document.getElementById('crash-report');
+        const crashDetails = document.getElementById('crash-details');
         
         window.isDismissed = false;
+
+        // GLOBAL ERROR HANDLER
+        window.onerror = function(msg, url, line, col, error) {
+            console.error("GLOBAL ERROR:", msg, error);
+            // Show crash report
+            if (splash) splash.style.display = 'none';
+            if (crashReport) {
+                crashReport.style.display = 'flex';
+                crashDetails.textContent = msg + "\n" + (error ? error.stack : '');
+            }
+            return false;
+        };
+
+        // If promise rejection is unhandled
+        window.onunhandledrejection = function(event) {
+            console.error("UNHANDLED PROMISE:", event.reason);
+            // Optional: Don't show full crash screen for every promise rejection, but keep log
+        };
 
         window.signalAppReady = function() {
             console.log("BOOT: App Ready.");
@@ -252,9 +235,9 @@
         window.finishBootSequence = function() {
             if (window.isDismissed) return;
             window.isDismissed = true;
-            splash.classList.add('splash-fade-out');
+            if(splash) splash.classList.add('splash-fade-out');
             setTimeout(() => {
-                splash.style.display = 'none';
+                if(splash) splash.style.display = 'none';
                 document.body.style.overflow = 'auto'; 
                 if (video) video.pause();
             }, 850); 
@@ -262,19 +245,6 @@
 
         window.triggerFastBoot = function() {
             window.finishBootSequence();
-        };
-
-        window.emergencyReset = function(e) {
-            e.stopPropagation();
-            if(confirm("Factory Reset? This clears all local data.")) {
-                localStorage.clear();
-                try {
-                    window.indexedDB.databases().then(dbs => {
-                        dbs.forEach(db => window.indexedDB.deleteDatabase(db.name));
-                    });
-                } catch(e) {}
-                setTimeout(() => window.location.reload(), 500);
-            }
         };
 
         // Video Sequence

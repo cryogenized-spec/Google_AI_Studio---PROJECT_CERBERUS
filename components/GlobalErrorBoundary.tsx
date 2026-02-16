@@ -96,7 +96,7 @@ export class GlobalErrorBoundary extends Component<Props, State> {
       );
     }
 
-    // @ts-ignore - Explicitly ignore TS checking on props for Component inheritance edge cases
-    return this.props.children; 
+    // Cast 'this' to any to avoid 'Property props does not exist on type...' error in some envs
+    return (this as any).props.children;
   }
 }

@@ -1,5 +1,6 @@
+
 import React from 'react';
-import { Plus, Trash2, Settings, MessageSquare, Menu, X, Download, Radio, ScrollText } from 'lucide-react';
+import { Plus, Trash2, Settings, MessageSquare, Menu, X, Download, Radio, ScrollText, Skull, Layers, Users } from 'lucide-react';
 import { Thread, ThreadType } from '../types';
 
 interface SidebarProps {
@@ -13,6 +14,9 @@ interface SidebarProps {
   onClose: () => void;
   onExport: () => void;
   onOpenScriptorium: () => void;
+  onOpenDungeon: () => void;
+  onOpenTower: () => void;
+  onOpenCharacters: () => void; // New prop
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
@@ -25,7 +29,10 @@ const Sidebar: React.FC<SidebarProps> = ({
   isOpen,
   onClose,
   onExport,
-  onOpenScriptorium
+  onOpenScriptorium,
+  onOpenDungeon,
+  onOpenTower,
+  onOpenCharacters
 }) => {
   const staticThreads = threads.filter(t => t.type === 'static');
   const ritualThreads = threads.filter(t => t.type === 'ritual' || !t.type); // Fallback for old data
@@ -80,6 +87,24 @@ const Sidebar: React.FC<SidebarProps> = ({
                 <ScrollText size={16} className="shrink-0 text-cerberus-500" />
                 <span className="truncate text-sm font-medium flex-1 font-serif">The Scriptorium</span>
             </div>
+
+            {/* The Gauntlet (Dungeon) Entry */}
+            <div
+                className="group flex items-center gap-3 p-3 rounded-md cursor-pointer transition-all duration-200 text-gray-400 hover:bg-cerberus-800/50 hover:text-white border-l-2 border-transparent hover:border-red-900"
+                onClick={() => { onOpenDungeon(); if(window.innerWidth < 768) onClose(); }}
+            >
+                <Skull size={16} className="shrink-0 text-gray-500 group-hover:text-red-500 transition-colors" />
+                <span className="truncate text-sm font-medium flex-1 font-serif">The Gauntlet</span>
+            </div>
+
+            {/* The Tower of Mirrors Entry */}
+            <div
+                className="group flex items-center gap-3 p-3 rounded-md cursor-pointer transition-all duration-200 text-gray-400 hover:bg-cerberus-800/50 hover:text-white border-l-2 border-transparent hover:border-indigo-500"
+                onClick={() => { onOpenTower(); if(window.innerWidth < 768) onClose(); }}
+            >
+                <Layers size={16} className="shrink-0 text-indigo-400 group-hover:text-indigo-300 transition-colors" />
+                <span className="truncate text-sm font-medium flex-1 font-serif">Tower of Mirrors</span>
+            </div>
         </div>
 
         <div className="p-4">
@@ -124,13 +149,15 @@ const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         <div className="p-4 border-t border-cerberus-800 bg-cerberus-900/50 space-y-2">
-           <button
-            onClick={onExport}
-            className="w-full flex items-center gap-3 p-2 text-gray-400 hover:text-cerberus-accent hover:bg-cerberus-800 rounded transition-colors text-sm"
+          {/* CHARACTERS ENTRY */}
+          <button
+            onClick={() => { onOpenCharacters(); if(window.innerWidth < 768) onClose(); }}
+            className="w-full flex items-center gap-3 p-2 text-gray-400 hover:text-white hover:bg-cerberus-800 rounded transition-colors text-sm mb-2 group"
           >
-            <Download size={18} />
-            <span>Export Record</span>
+            <Users size={18} className="group-hover:text-cerberus-accent transition-colors" />
+            <span className="uppercase tracking-widest text-xs font-bold">Characters</span>
           </button>
+
           <button
             onClick={onOpenSettings}
             className="w-full flex items-center gap-3 p-2 text-gray-400 hover:text-cerberus-accent hover:bg-cerberus-800 rounded transition-colors text-sm"

@@ -1,8 +1,10 @@
+
 import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Send, Menu, Sparkles, MapPin, ShieldAlert, Square, Check, X as XIcon, Shirt, Mic, MicOff } from 'lucide-react';
-import { Message, Room, CharacterProfile, MoodState, AgentMode } from '../types';
+import { Send, Menu, MapPin, Square, Check, X as XIcon, Shirt, Mic, MicOff, RefreshCw, AlertCircle, ShieldAlert, Link as LinkIcon, Activity, Sparkles, ChevronLeft, ChevronRight, Scale, ScrollText, Eye, BrainCircuit, X, Mail, Trash2, Sliders, User, ChevronDown, ChevronUp } from 'lucide-react';
+import { Message, Room, CharacterProfile, MoodState, AgentMode, AppSettings } from '../types';
 import Portrait from './Portrait';
+import { useTranscriber } from '../hooks/useTranscriber';
 
 // --- Icons (Vector Components) ---
 
@@ -58,17 +60,16 @@ interface MessageItemProps {
     isStreaming: boolean;
     onDelete: (id: string) => void;
     onRegenerate: () => void;
+    onReiterate: (id: string, mode: 'context' | 'logic') => void;
     onVersionChange: (id: string, index: number) => void;
     onEdit: (id: string, newContent: string) => void;
     onContinue: () => void;
     
-    // Aesthetic Props - Entity
+    // Aesthetic Props
     aiTextColor: string;
     aiTextStyle: 'none' | 'shadow' | 'outline' | 'neon';
     aiFontFamily: string;
     aiTextSize: number;
-
-    // Aesthetic Props - User
     userTextColor: string;
     userFontFamily: string;
     userTextSize: number;
@@ -81,6 +82,7 @@ const MessageItem: React.FC<MessageItemProps> = ({
     isStreaming,
     onDelete, 
     onRegenerate,
+    onReiterate,
     onVersionChange,
     onEdit,
     onContinue,
@@ -104,6 +106,8 @@ const MessageItem: React.FC<MessageItemProps> = ({
     // Swipe State
     const [dragX, setDragX] = useState(0);
     const startXRef = useRef<number | null>(null);
+    const THRESHOLD = 80;
+    const LIMIT = 80; // Hard stop at threshold per user request
 
     // Double Tap Logic
     const lastTapRef = useRef<number>(0);
@@ -135,28 +139,46 @@ const MessageItem: React.FC<MessageItemProps> = ({
         setIsEditing(false);
     };
 
-    const handleStart = (clientX: number) => {
-        if (!hasVersions || isEditing) return;
-        startXRef.current = clientX;
+    // --- Pointer Events for Robust Dragging ---
+    
+    const handlePointerDown = (e: React.PointerEvent) => {
+        // Drag only allowed for Last Model Message
+        if (isEditing || isStreaming || !isLast || !isModel) return;
+        
+        // Prevent text selection
+        e.preventDefault(); 
+        
+        startXRef.current = e.clientX;
+        (e.target as Element).setPointerCapture(e.pointerId);
     };
 
-    const handleMove = (clientX: number) => {
-        if (startXRef.current === null || !hasVersions || isEditing) return;
-        const diff = clientX - startXRef.current;
-        setDragX(diff / 2.5);
+    const handlePointerMove = (e: React.PointerEvent) => {
+        if (startXRef.current === null) return;
+        
+        const diff = e.clientX - startXRef.current;
+        
+        // Apply resistance (logarithmic-like dampening)
+        const resistance = 0.6;
+        const dampenedDiff = diff * resistance;
+        
+        // Hard limit clamp
+        const clampedDiff = Math.max(-LIMIT, Math.min(LIMIT, dampenedDiff));
+        
+        setDragX(clampedDiff);
     };
 
-    const handleEnd = () => {
-        if (startXRef.current === null || !hasVersions || isEditing) {
-            setDragX(0);
-            return;
-        }
+    const handlePointerUp = (e: React.PointerEvent) => {
+        if (startXRef.current === null) return;
+        
+        (e.target as Element).releasePointerCapture(e.pointerId);
 
-        const threshold = 50; 
-        if (dragX > threshold && currentVersionIndex > 0) {
-             onVersionChange(msg.id, currentVersionIndex - 1);
-        } else if (dragX < -threshold && currentVersionIndex < totalVersions - 1) {
-             onVersionChange(msg.id, currentVersionIndex + 1);
+        // Inclusive check to ensure hitting the wall triggers the action
+        if (dragX >= THRESHOLD) {
+             // Swipe Right -> Integrity Reiterate (Soft Penalizer)
+             onReiterate(msg.id, 'logic');
+        } else if (dragX <= -THRESHOLD) {
+             // Swipe Left -> Narrative Reiterate (Context Focus)
+             onReiterate(msg.id, 'context');
         }
         
         setDragX(0);
@@ -192,36 +214,50 @@ const MessageItem: React.FC<MessageItemProps> = ({
         }
     };
 
+    const logicOpacity = Math.min(1, Math.max(0, dragX / THRESHOLD));
+    const contextOpacity = Math.min(1, Math.max(0, -dragX / THRESHOLD));
+    const progressPercent = Math.min(100, (Math.abs(dragX) / THRESHOLD) * 100);
+
     return (
         <div className={`flex flex-col ${isModel ? 'items-start' : 'items-end'} group relative mb-4`}>
             <div className={`max-w-[95%] md:max-w-2xl w-full ${isModel ? 'text-left' : 'text-right'}`}>
                 
                 {/* Meta Controls */}
                 <div className={`flex items-center gap-3 mb-1 ${isModel ? 'justify-start' : 'justify-end'}`}>
-                    {/* Role Label */}
                     <span className={`text-[9px] uppercase tracking-[0.2em] font-bold opacity-80 ${isModel ? 'text-pink-300' : 'text-gray-500'}`}>
                         {isModel ? characterName : 'You'}
                     </span>
                     
-                    {/* Version Indicator */}
+                    {/* Version Navigation (Arrows) */}
                     {hasVersions && (
-                        <span className="text-[9px] font-mono text-cerberus-accent opacity-80 select-none">
-                            {currentVersionIndex + 1}/{totalVersions}
-                        </span>
+                        <div className="flex items-center gap-1 text-[9px] font-mono text-cerberus-accent opacity-80 select-none bg-black/20 rounded px-1">
+                            <button 
+                                onClick={() => onVersionChange(msg.id, currentVersionIndex - 1)} 
+                                disabled={currentVersionIndex === 0}
+                                className="disabled:opacity-30 hover:text-white transition-colors"
+                            >
+                                <ChevronLeft size={12}/>
+                            </button>
+                            <span>{currentVersionIndex + 1}/{totalVersions}</span>
+                            <button 
+                                onClick={() => onVersionChange(msg.id, currentVersionIndex + 1)} 
+                                disabled={currentVersionIndex === totalVersions - 1}
+                                className="disabled:opacity-30 hover:text-white transition-colors"
+                            >
+                                <ChevronRight size={12}/>
+                            </button>
+                        </div>
                     )}
 
-                    {/* Regeneration Ankh - Only on last model message */}
                     {isModel && isLast && !isStreaming && (
                          <button 
                             onClick={onRegenerate}
                             className="text-cerberus-accent hover:text-white transition-colors p-0.5 opacity-60 hover:opacity-100 duration-500 hover:scale-110"
-                            title="Regenerate"
+                            title="Regenerate Standard"
                         >
                             <AnkhIcon className="w-4 h-4" />
                         </button>
                     )}
-
-                    {/* Delete Button (Cinder Bowl) */}
                     <button 
                         onClick={() => onDelete(msg.id)}
                         className="opacity-0 group-hover:opacity-100 transition-opacity text-red-900 hover:text-red-500 p-0.5"
@@ -231,63 +267,93 @@ const MessageItem: React.FC<MessageItemProps> = ({
                     </button>
                 </div>
 
-                {/* Content Bubble */}
-                <div 
-                    className="relative touch-pan-y"
-                    onMouseDown={(e) => handleStart(e.clientX)}
-                    onMouseMove={(e) => handleMove(e.clientX)}
-                    onMouseUp={handleEnd}
-                    onMouseLeave={handleEnd}
-                    onTouchStart={(e) => handleStart(e.touches[0].clientX)}
-                    onTouchMove={(e) => handleMove(e.touches[0].clientX)}
-                    onTouchEnd={handleEnd}
-                    onClick={handleDoubleTap} 
-                >
-                    {isEditing ? (
-                         <div className="bg-cerberus-900/80 backdrop-blur-sm border border-cerberus-600 rounded-xl p-2 animate-fadeIn">
-                            <textarea 
-                                value={editContent}
-                                onChange={(e) => setEditContent(e.target.value)}
-                                className="w-full bg-transparent text-gray-200 text-sm focus:outline-none resize-none custom-scrollbar"
-                                rows={Math.min(editContent.split('\n').length + 1, 8)}
-                                autoFocus
-                            />
-                            <div className="flex justify-end gap-2 mt-2">
-                                <button onClick={handleCancelEdit} className="p-1 text-red-400 hover:text-red-300"><XIcon size={16}/></button>
-                                <button onClick={handleSaveEdit} className="p-1 text-green-400 hover:text-green-300"><Check size={16}/></button>
+                {/* Content Bubble with Swipe Layers */}
+                <div className="relative touch-pan-y h-full">
+                    
+                    {/* Background Icons Layer (Reiterate Feedback) */}
+                    {isModel && isLast && (
+                        <div className="absolute inset-0 flex items-center justify-between px-4 pointer-events-none overflow-hidden rounded-xl z-0">
+                            {/* Integrity Reiterate (Left Reveal - Swipe Right) */}
+                            <div 
+                                className="flex flex-col items-start gap-1 text-amber-500 font-bold text-xs uppercase tracking-widest transition-all duration-75"
+                                style={{ opacity: logicOpacity, transform: `translateX(${dragX > 0 ? 0 : -30}px)` }}
+                            >
+                                <div className="flex items-center gap-2">
+                                    <Scale size={20} className="drop-shadow-[0_0_8px_rgba(245,158,11,0.6)]" />
+                                    <span className="hidden md:inline ml-1 text-[10px]">Integrity</span>
+                                </div>
+                                {/* Progress Bar */}
+                                <div className="w-20 h-1 bg-amber-900/50 rounded-full overflow-hidden mt-1">
+                                    <div 
+                                        className={`h-full transition-all duration-75 ${dragX >= THRESHOLD ? 'bg-amber-400 shadow-[0_0_5px_#fbbf24]' : 'bg-amber-700'}`} 
+                                        style={{ width: `${progressPercent}%` }}
+                                    />
+                                </div>
                             </div>
-                         </div>
-                    ) : (
-                        <div 
-                            className={`
-                            prose prose-sm prose-invert max-w-none leading-snug break-words transition-transform duration-200 ease-out select-none
-                            ${isModel 
-                                ? 'tracking-wide cursor-grab active:cursor-grabbing' 
-                                : 'bg-cerberus-900/40 backdrop-blur-sm px-3 py-2 rounded-xl rounded-tr-none border border-cerberus-700/30 cursor-pointer'}
-                            `}
-                            style={{ 
-                                transform: `translateX(${dragX}px)`,
-                                ...getMessageStyle() 
-                            }}
-                        >
-                            <div className={isModel ? '[&_strong]:text-white pointer-events-none' : 'pointer-events-none'}>
-                                <ReactMarkdown>{msg.content}</ReactMarkdown>
+
+                            {/* Narrative Reiterate (Right Reveal - Swipe Left) */}
+                            <div 
+                                className="flex flex-col items-end gap-1 text-cyan-400 font-bold text-xs uppercase tracking-widest transition-all duration-75"
+                                style={{ opacity: contextOpacity, transform: `translateX(${dragX < 0 ? 0 : 30}px)` }}
+                            >
+                                <div className="flex items-center gap-2">
+                                    <span className="hidden md:inline mr-1 text-[10px]">Narrative</span>
+                                    <ScrollText size={20} className="drop-shadow-[0_0_8px_rgba(34,211,238,0.6)]" />
+                                </div>
+                                {/* Progress Bar */}
+                                <div className="w-20 h-1 bg-cyan-900/50 rounded-full overflow-hidden mt-1">
+                                    <div 
+                                        className={`h-full transition-all duration-75 ${-dragX >= THRESHOLD ? 'bg-cyan-400 shadow-[0_0_5px_#22d3ee]' : 'bg-cyan-700'}`} 
+                                        style={{ width: `${progressPercent}%` }}
+                                    />
+                                </div>
                             </div>
                         </div>
                     )}
-                </div>
 
-                {/* Pagination Dots */}
-                {hasVersions && (
-                    <div className="flex justify-center gap-1 mt-1">
-                        {msg.versions.map((_, i) => (
+                    {/* Draggable Bubble */}
+                    <div 
+                        onPointerDown={handlePointerDown}
+                        onPointerMove={handlePointerMove}
+                        onPointerUp={handlePointerUp}
+                        onPointerCancel={handlePointerUp}
+                        onClick={handleDoubleTap}
+                        className="relative z-10 touch-pan-y"
+                    >
+                        {isEditing ? (
+                             <div className="bg-cerberus-900/80 backdrop-blur-sm border border-cerberus-600 rounded-xl p-2 animate-fadeIn">
+                                <textarea 
+                                    value={editContent}
+                                    onChange={(e) => setEditContent(e.target.value)}
+                                    className="w-full bg-transparent text-gray-200 text-sm focus:outline-none resize-none custom-scrollbar"
+                                    rows={Math.min(editContent.split('\n').length + 1, 8)}
+                                    autoFocus
+                                />
+                                <div className="flex justify-end gap-2 mt-2">
+                                    <button onClick={handleCancelEdit} className="p-1 text-red-400 hover:text-red-300"><XIcon size={16}/></button>
+                                    <button onClick={handleSaveEdit} className="p-1 text-green-400 hover:text-green-300"><Check size={16}/></button>
+                                </div>
+                             </div>
+                        ) : (
                             <div 
-                                key={i} 
-                                className={`w-1 h-1 rounded-full ${i === currentVersionIndex ? 'bg-cerberus-accent' : 'bg-cerberus-800'}`}
-                            />
-                        ))}
+                                className={`
+                                prose prose-sm prose-invert max-w-none leading-snug break-words transition-transform duration-75 ease-linear select-none
+                                ${isModel 
+                                    ? 'tracking-wide cursor-grab active:cursor-grabbing' 
+                                    : 'bg-cerberus-900/40 backdrop-blur-sm px-3 py-2 rounded-xl rounded-tr-none border border-cerberus-700/30 cursor-pointer'}
+                                `}
+                                style={{ 
+                                    transform: `translateX(${dragX}px)`,
+                                    ...getMessageStyle() 
+                                }}
+                            >
+                                <div className={isModel ? '[&_strong]:text-white pointer-events-none' : 'pointer-events-none'}>
+                                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                                </div>
+                            </div>
+                        )}
                     </div>
-                )}
+                </div>
             </div>
         </div>
     );
@@ -298,11 +364,14 @@ const MessageItem: React.FC<MessageItemProps> = ({
 
 interface ChatAreaProps {
   messages: Message[];
+  oocMessages?: Message[];
   isStreaming: boolean;
   enterToSend: boolean;
   onSendMessage: (content: string) => void;
+  onSendOOC: (content: string) => void;
   onStopGeneration: () => void;
   onRegenerate: () => void;
+  onReiterate: (id: string, mode: 'context' | 'logic') => void;
   onDeleteMessage: (id: string) => void;
   onVersionChange: (id: string, index: number) => void;
   onEditMessage: (id: string, newContent: string) => void;
@@ -320,6 +389,13 @@ interface ChatAreaProps {
   agentMode: AgentMode;
   currentPortraitUrl?: string; 
   
+  // VTT Props
+  apiKeyOpenAI?: string;
+  apiKeyGemini?: string; // New
+  vttMode?: 'browser' | 'openai' | 'gemini';
+  vttAutoSend?: boolean;
+  transcriptionModel?: string; // Added
+
   // Appearance Props
   bgBrightness: number;
   aiTextFontUrl: string;
@@ -331,6 +407,20 @@ interface ChatAreaProps {
   userTextFontUrl: string;
   userTextColor: string;
   userTextSize: number;
+
+  // OOC Assist & Controls
+  hasUnreadOOC?: boolean;
+  oocAssistEnabled?: boolean;
+  oocProactivity?: number;
+  oocStyle?: number;
+  oocVerboseMode?: number; // 1-3
+  onUpdateOOCSettings?: (settings: Partial<AppSettings>) => void;
+  onClearOOC?: () => void;
+  onDeleteOOC?: (id: string) => void;
+  onMarkOOCRead?: () => void;
+
+  // Layout State
+  isSidebarOpen: boolean; // NEW PROP
 }
 
 // Helper to inject font dynamically
@@ -360,11 +450,14 @@ const getFontFamilyFromUrl = (url: string) => {
 
 const ChatArea: React.FC<ChatAreaProps> = ({
   messages,
+  oocMessages = [],
   isStreaming,
   enterToSend,
   onSendMessage,
+  onSendOOC,
   onStopGeneration,
   onRegenerate,
+  onReiterate,
   onDeleteMessage,
   onVersionChange,
   onEditMessage,
@@ -381,6 +474,11 @@ const ChatArea: React.FC<ChatAreaProps> = ({
   moodState,
   agentMode,
   currentPortraitUrl,
+  apiKeyOpenAI,
+  apiKeyGemini,
+  vttMode = 'browser',
+  vttAutoSend = false,
+  transcriptionModel = 'gpt-4o-mini-transcribe', // Default
   bgBrightness,
   aiTextFontUrl,
   aiTextColor,
@@ -388,17 +486,39 @@ const ChatArea: React.FC<ChatAreaProps> = ({
   aiTextSize,
   userTextFontUrl,
   userTextColor,
-  userTextSize
+  userTextSize,
+  hasUnreadOOC,
+  oocAssistEnabled = true,
+  oocProactivity = 5,
+  oocStyle = 6,
+  oocVerboseMode = 2,
+  onUpdateOOCSettings,
+  onClearOOC,
+  onDeleteOOC,
+  onMarkOOCRead,
+  isSidebarOpen // Destructure
 }) => {
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const oocEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
+  const [isOOCPanelOpen, setIsOOCPanelOpen] = useState(false);
+  const [isPortraitCollapsed, setIsPortraitCollapsed] = useState(false);
+  const [isAssistSettingsOpen, setIsAssistSettingsOpen] = useState(true);
   
-  // VTT State
-  const [isRecording, setIsRecording] = useState(false);
-  const recognitionRef = useRef<any>(null);
-  const baseInputRef = useRef('');
+  // Portrait Double Tap Logic
+  const lastPortraitTapRef = useRef<number>(0);
+  
+  // VTT Hook
+  const { isRecording, isTranscribing, error, startRecording, stopRecording, retry } = useTranscriber({
+      mode: vttMode as 'browser' | 'openai' | 'gemini',
+      model: transcriptionModel,
+      apiKey: vttMode === 'gemini' ? apiKeyGemini : apiKeyOpenAI, // Correct key routing
+      onInputUpdate: (text) => setInput(text),
+      onSend: (text) => isOOCPanelOpen ? onSendOOC(text) : onSendMessage(text),
+      autoSend: vttAutoSend
+  });
 
   // Dynamic Fonts
   useDynamicFont(aiTextFontUrl, 'ai');
@@ -413,9 +533,24 @@ const ChatArea: React.FC<ChatAreaProps> = ({
     }, 100);
   };
 
+  const scrollOOCBottom = () => {
+    setTimeout(() => {
+        oocEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, 100);
+  };
+
   useEffect(() => {
     scrollToBottom();
   }, [messages, isStreaming, keyboardOpen]);
+
+  useEffect(() => {
+    if (isOOCPanelOpen) {
+        scrollOOCBottom();
+        if (hasUnreadOOC && onMarkOOCRead) {
+            onMarkOOCRead();
+        }
+    }
+  }, [oocMessages, isOOCPanelOpen, hasUnreadOOC]);
 
   useEffect(() => {
     const handleResize = () => { scrollToBottom(); };
@@ -437,46 +572,37 @@ const ChatArea: React.FC<ChatAreaProps> = ({
 
   const toggleRecording = () => {
     if (isRecording) {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
-      }
-      setIsRecording(false);
+      stopRecording();
     } else {
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      if (!SpeechRecognition) {
-        alert("Voice recognition not supported in this browser.");
-        return;
-      }
-      const recognition = new SpeechRecognition();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
-      baseInputRef.current = input;
-      recognition.onstart = () => { setIsRecording(true); };
-      recognition.onresult = (event: any) => {
-        const sessionTranscript = Array.from(event.results).map((res: any) => res[0].transcript).join('');
-        const spacer = (baseInputRef.current && !baseInputRef.current.endsWith(' ')) ? ' ' : '';
-        setInput(baseInputRef.current + spacer + sessionTranscript);
-      };
-      recognition.onerror = (event: any) => { console.error('Speech error', event.error); setIsRecording(false); };
-      recognition.onend = () => { setIsRecording(false); };
-      recognitionRef.current = recognition;
-      recognition.start();
+      startRecording();
     }
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
-    if (isRecording) baseInputRef.current = e.target.value;
   };
 
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!input.trim() || isStreaming) return;
-    onSendMessage(input);
+    
+    if (isOOCPanelOpen) {
+        onSendOOC(input);
+    } else {
+        onSendMessage(input);
+    }
+    
     setInput('');
-    baseInputRef.current = '';
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
+  };
+
+  // SMART BUTTON LOGIC
+  const handleSmartAction = () => {
+      if (input.trim()) {
+          handleSubmit();
+      } else {
+          toggleRecording();
+      }
   };
 
   const handleStop = (e: React.MouseEvent) => {
@@ -491,6 +617,20 @@ const ChatArea: React.FC<ChatAreaProps> = ({
             handleSubmit();
         }
     }
+  };
+
+  const handleClearOOCConfirm = () => {
+      if (confirm("Are you sure you want to delete all OOC history?")) {
+          onClearOOC?.();
+      }
+  };
+
+  const handlePortraitTap = () => {
+      const now = Date.now();
+      if (now - lastPortraitTapRef.current < 300) {
+          setIsPortraitCollapsed(!isPortraitCollapsed); // Manual Toggle
+      }
+      lastPortraitTapRef.current = now;
   };
 
   const lastMessageId = messages.length > 0 ? messages[messages.length - 1].id : null;
@@ -513,118 +653,281 @@ const ChatArea: React.FC<ChatAreaProps> = ({
       {/* Dynamic Gradient Overlay */}
       <div className="absolute inset-0 bg-gradient-to-b from-cerberus-void/70 via-cerberus-void/60 to-cerberus-void/90 pointer-events-none" />
 
-      {/* Header */}
-      <div className="absolute top-0 left-0 right-0 z-10 p-4 flex justify-between items-start pointer-events-none">
+      {/* RECORDING OVERLAY */}
+      {isRecording && (
+          <div className="absolute inset-0 z-[60] bg-black/60 backdrop-blur-md flex flex-col items-center justify-end pb-32 animate-fadeIn">
+              <div className="relative">
+                  {/* Pulse Rings */}
+                  <div className="absolute inset-0 bg-violet-500 rounded-full animate-ping opacity-20 delay-100"></div>
+                  <div className="absolute inset-[-20px] bg-violet-500 rounded-full animate-ping opacity-10 delay-300"></div>
+                  <div className="absolute inset-[-40px] bg-violet-500 rounded-full animate-ping opacity-5 delay-500"></div>
+                  
+                  {/* Main Mic Button */}
+                  <button 
+                      onClick={toggleRecording}
+                      className="relative w-24 h-24 bg-violet-900 rounded-full flex items-center justify-center text-white shadow-[0_0_50px_rgba(139,92,246,0.6)] hover:scale-105 transition-transform border-2 border-violet-500"
+                  >
+                      <Mic size={40} className="drop-shadow-lg" />
+                  </button>
+              </div>
+              <h2 className="mt-8 text-2xl font-serif tracking-[0.2em] text-violet-200 font-bold animate-pulse">LISTENING...</h2>
+              <p className="mt-2 text-xs font-mono text-violet-300/70 tracking-widest">TAP TO STOP</p>
+          </div>
+      )}
+
+      {/* Header - Z-INDEX INCREASED TO 50 TO SIT OVER OOC PANEL */}
+      <div 
+        className="absolute top-0 left-0 right-0 z-50 px-4 flex justify-between items-start pointer-events-none pb-4"
+        style={{ paddingTop: 'max(1rem, env(safe-area-inset-top))' }}
+      >
         
         {/* Left Side: Controls & Status */}
-        <div className="pointer-events-auto flex flex-col gap-3">
-           {/* Room Selector */}
-           <div className="flex items-center gap-2">
-                <button onClick={onSidebarToggle} className="md:hidden text-cerberus-accent p-2 bg-cerberus-900/50 rounded-full backdrop-blur">
+        {/* MODIFIED: Hides when sidebar is open to prevent overlap/clutter */}
+        <div className={`pointer-events-auto flex flex-col gap-2 items-start mt-2 transition-opacity duration-300 ${isSidebarOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}>
+           
+           {/* Room Selector - MODIFIED: Tighter constraints, using w-fit on container */}
+           <div className="flex items-center gap-2 max-w-[180px]">
+                <button onClick={onSidebarToggle} className="md:hidden text-cerberus-accent p-2 bg-cerberus-900/50 rounded-full backdrop-blur shrink-0">
                     <Menu size={20} />
                 </button>
-                <div className="group relative">
-                    <button className="flex items-center gap-2 text-cerberus-accent bg-cerberus-900/40 backdrop-blur-md border border-cerberus-700/50 px-3 py-1 rounded-full text-[10px] font-serif tracking-widest uppercase hover:bg-cerberus-800 transition-all shadow-lg">
-                        <MapPin size={10} />
-                        <span>{activeRoom.name}</span>
+                <div className="group relative w-fit inline-flex shrink-0">
+                    <button className="inline-flex w-fit items-center gap-2 text-cerberus-accent bg-cerberus-900/40 backdrop-blur-md border border-cerberus-700/50 px-3 py-2 rounded-2xl text-[10px] font-serif tracking-widest uppercase hover:bg-cerberus-800 transition-all shadow-lg text-left h-auto max-w-full">
+                        <MapPin size={10} className="shrink-0" />
+                        <span className="whitespace-normal leading-tight line-clamp-2">{activeRoom.name}</span>
                     </button>
+                    {/* Dropdown Menu */}
                     <div className="absolute top-full left-0 mt-2 w-64 bg-cerberus-900/95 border border-cerberus-700 rounded shadow-xl overflow-hidden opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 transform origin-top-left backdrop-blur-md z-50">
                         {rooms.map(room => (
-                            <div 
+                            <button
                                 key={room.id}
                                 onClick={() => onRoomChange(room.id)}
-                                className={`p-3 cursor-pointer hover:bg-cerberus-800 transition-colors border-b border-cerberus-800 last:border-0 ${activeRoom.id === room.id ? 'bg-cerberus-800/50 text-cerberus-accent' : 'text-gray-400'}`}
+                                className={`w-full text-left px-4 py-3 text-[10px] font-serif uppercase tracking-widest hover:bg-cerberus-800 transition-colors flex items-center justify-between group/item ${activeRoom.id === room.id ? 'text-cerberus-accent bg-cerberus-800/30' : 'text-gray-500'}`}
                             >
-                                <div className="font-serif text-sm font-bold mb-1">{room.name}</div>
-                                <div className="text-[10px] leading-tight opacity-70 line-clamp-2">{room.description}</div>
-                            </div>
+                                <span className="group-hover/item:text-gray-200 transition-colors truncate pr-2">{room.name}</span>
+                                {activeRoom.id === room.id && <Check size={12} className="text-cerberus-accent shrink-0"/>}
+                            </button>
                         ))}
                     </div>
                 </div>
-           </div>
-           
-           {/* Mood/Agent Status */}
-           <div className="flex items-center gap-2 ml-1 opacity-70 hover:opacity-100 transition-opacity">
-                <div className={`px-1.5 py-0.5 rounded text-[9px] uppercase font-bold tracking-wider backdrop-blur-sm ${agentMode === 'active' ? 'bg-green-900/30 text-green-400' : 'bg-blue-900/30 text-blue-400'}`}>
-                    {agentMode}
-                </div>
-                <div className="px-1.5 py-0.5 rounded text-[9px] uppercase font-bold tracking-wider bg-cerberus-800/30 text-cerberus-accent border border-cerberus-800/50 backdrop-blur-sm">
-                    {moodState.currentMood}
-                </div>
-           </div>
+            </div>
 
-           {/* Action Buttons */}
-           <div className="flex gap-2 ml-1">
-                <button onClick={onWardrobeOpen} className="flex items-center gap-2 text-cerberus-accent hover:text-white transition-colors opacity-70 hover:opacity-100 bg-cerberus-900/50 px-2 py-1.5 rounded-full border border-cerberus-700/30" title="Wardrobe">
+            {/* OOC Toggle & Attire - Stacked SIDE-BY-SIDE */}
+            <div className="flex items-center gap-2 ml-1">
+                <button 
+                    onClick={() => setIsOOCPanelOpen(!isOOCPanelOpen)}
+                    className={`
+                        flex items-center gap-2 text-violet-200 hover:text-white transition-all duration-300 opacity-90 hover:opacity-100 px-3 py-1.5 rounded-full border shadow-[0_0_15px_rgba(139,92,246,0.15)] w-max
+                        ${isOOCPanelOpen 
+                            ? 'bg-violet-900/90 border-violet-400 shadow-[0_0_20px_rgba(139,92,246,0.5)]' 
+                            : 'bg-violet-950/40 border-violet-800 hover:border-violet-600'}
+                    `}
+                    title="Toggle OOC Mode"
+                >
+                    <BrainCircuit size={14} className={isOOCPanelOpen ? "text-white" : "text-violet-400"} />
+                    <span className="text-[10px] font-mono uppercase tracking-wider">OOC Mode</span>
+                    {hasUnreadOOC && !isOOCPanelOpen && (
+                        <Mail size={12} className="text-pink-400 animate-pulse ml-1" fill="currentColor" />
+                    )}
+                </button>
+
+                {/* Attire Pill */}
+                <button onClick={onWardrobeOpen} className="flex items-center gap-2 text-cerberus-accent hover:text-white transition-colors opacity-70 hover:opacity-100 bg-cerberus-900/50 px-2 py-1.5 rounded-full border border-cerberus-700/30 self-start" title="Wardrobe">
                     <Shirt size={14} />
                     <span className="text-[9px] font-mono uppercase">Attire</span>
                 </button>
-                <button onClick={onDeepLogicOpen} className="flex items-center gap-2 text-red-900 hover:text-red-500 transition-colors opacity-50 hover:opacity-100 bg-cerberus-900/50 px-2 py-1.5 rounded-full border border-red-900/20" title="Deep Logic">
-                    <ShieldAlert size={14} />
-                    <span className="text-[9px] font-mono uppercase">Logic</span>
+            </div>
+        </div>
+
+        {/* Right Side: Portrait - RESTORED TO TOP RIGHT */}
+        {/* Only hide on mobile if sidebar is open to reduce clutter/z-index issues */}
+        <div className={`pointer-events-auto flex flex-col items-end gap-2 mt-2 ${isSidebarOpen ? 'hidden md:flex' : 'flex'}`}>
+            {isPortraitCollapsed ? (
+                <button
+                    onClick={() => setIsPortraitCollapsed(false)}
+                    className="flex items-center justify-center w-12 h-12 bg-cerberus-900/90 border border-cerberus-700 rounded-full shadow-lg backdrop-blur text-cerberus-accent hover:text-white hover:border-cerberus-500 transition-all active:scale-95"
+                    title="Show Portrait"
+                >
+                    <User size={24} />
                 </button>
+            ) : (
+                <div 
+                    className="transition-transform duration-300 origin-top-right drop-shadow-2xl hover:scale-105 active:scale-95"
+                    onTouchEnd={handlePortraitTap}
+                    onClick={handlePortraitTap}
+                >
+                    <Portrait url={currentPortraitUrl || character.portraitUrl} scale={portraitScale} aspectRatio={portraitAspectRatio} />
+                </div>
+            )}
+        </div>
+      </div>
+
+        {/* MAIN CONTENT AREA */}
+        <div className="flex-1 flex overflow-hidden relative z-0">
+             {/* Chat List */}
+             <div className={`flex-1 overflow-y-auto p-4 md:p-6 space-y-6 custom-scrollbar scroll-smooth pt-24 pb-32 transition-all duration-300 ${isOOCPanelOpen ? 'w-full md:w-2/3' : 'w-full'}`}>
+                {messages.map((msg, index) => (
+                    <MessageItem 
+                        key={msg.id}
+                        msg={msg}
+                        characterName={character.name}
+                        isLast={index === messages.length - 1}
+                        isStreaming={isStreaming && index === messages.length - 1}
+                        onDelete={onDeleteMessage}
+                        onRegenerate={onRegenerate}
+                        onReiterate={onReiterate}
+                        onVersionChange={onVersionChange}
+                        onEdit={onEditMessage}
+                        onContinue={onContinueGeneration}
+                        aiTextColor={aiTextColor}
+                        aiTextStyle={aiTextStyle}
+                        aiFontFamily={aiFontFamily}
+                        aiTextSize={aiTextSize}
+                        userTextColor={userTextColor}
+                        userFontFamily={userFontFamily}
+                        userTextSize={userTextSize}
+                    />
+                ))}
+                <div ref={messagesEndRef} className="h-4"/>
+             </div>
+
+             {/* OOC Panel (Slide over or Side by Side) */}
+             <div className={`
+                absolute inset-y-0 right-0 z-20 w-full md:w-96 bg-cerberus-900/95 backdrop-blur-xl border-l border-cerberus-700 transform transition-transform duration-300 flex flex-col pt-32
+                ${isOOCPanelOpen ? 'translate-x-0' : 'translate-x-full'}
+             `}>
+                <div className="p-4 border-b border-cerberus-800 flex justify-between items-center bg-black/20">
+                    <h3 className="text-cerberus-accent font-mono text-xs uppercase tracking-widest flex items-center gap-2">
+                        <BrainCircuit size={14}/> {oocAssistEnabled ? 'Neural Link (Active)' : 'Neural Link (Offline)'}
+                    </h3>
+                    <div className="flex items-center gap-2">
+                        {onClearOOC && (
+                            <button onClick={handleClearOOCConfirm} className="text-gray-500 hover:text-red-400 p-1" title="Clear History">
+                                <Trash2 size={14}/>
+                            </button>
+                        )}
+                        <button onClick={() => setIsAssistSettingsOpen(!isAssistSettingsOpen)} className="text-gray-500 hover:text-white p-1">
+                            <Sliders size={14}/>
+                        </button>
+                        <button onClick={() => setIsOOCPanelOpen(false)} className="text-gray-500 hover:text-white p-1 md:hidden">
+                            <X size={16}/>
+                        </button>
+                    </div>
+                </div>
+
+                {/* OOC Settings Drawer */}
+                {isAssistSettingsOpen && onUpdateOOCSettings && (
+                     <div className="p-4 bg-black/40 border-b border-cerberus-800 space-y-3 animate-fadeIn">
+                        <div className="flex items-center justify-between">
+                            <label className="text-[10px] text-gray-400 uppercase">Assist Enabled</label>
+                            <div onClick={() => onUpdateOOCSettings({oocAssistEnabled: !oocAssistEnabled})} className={`w-8 h-4 rounded-full cursor-pointer p-0.5 ${oocAssistEnabled ? 'bg-cerberus-accent' : 'bg-gray-700'}`}>
+                                <div className={`w-3 h-3 bg-black rounded-full transition-transform ${oocAssistEnabled ? 'translate-x-4' : ''}`}/>
+                            </div>
+                        </div>
+                        <div>
+                             <label className="text-[10px] text-gray-400 uppercase flex justify-between">
+                                 <span>Proactivity</span>
+                                 <span>{oocProactivity}/10</span>
+                             </label>
+                             <input type="range" min="1" max="10" value={oocProactivity} onChange={(e) => onUpdateOOCSettings({oocProactivity: parseInt(e.target.value)})} className="w-full accent-cerberus-accent h-1"/>
+                        </div>
+                        <div>
+                             <label className="text-[10px] text-gray-400 uppercase flex justify-between">
+                                 <span>Verbose Mode</span>
+                                 <span>{oocVerboseMode === 1 ? 'Concise' : oocVerboseMode === 3 ? 'Verbose' : 'Balanced'}</span>
+                             </label>
+                             <input type="range" min="1" max="3" value={oocVerboseMode} onChange={(e) => onUpdateOOCSettings({oocVerboseMode: parseInt(e.target.value)})} className="w-full accent-cerberus-accent h-1"/>
+                        </div>
+                     </div>
+                )}
+
+                <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
+                    {oocMessages.map(msg => (
+                        <div key={msg.id} className={`flex flex-col ${msg.role === 'model' ? 'items-start' : 'items-end'}`}>
+                            <div className={`text-[9px] uppercase mb-1 opacity-50 ${msg.role === 'model' ? 'text-cerberus-accent' : 'text-gray-400'}`}>
+                                {msg.role === 'model' ? 'System' : 'User'}
+                            </div>
+                            <div className={`p-3 rounded border text-xs max-w-[90%] ${msg.role === 'model' ? 'bg-cerberus-800/50 border-cerberus-700 text-gray-300' : 'bg-gray-800 border-gray-700 text-gray-300'}`}>
+                                {msg.content}
+                            </div>
+                            {msg.role === 'user' && onDeleteOOC && (
+                                <button onClick={() => onDeleteOOC(msg.id)} className="text-[9px] text-red-900 hover:text-red-500 mt-1 self-end">Delete</button>
+                            )}
+                        </div>
+                    ))}
+                    <div ref={oocEndRef}/>
+                </div>
+             </div>
+        </div>
+
+        {/* INPUT BAR - FIXED BOTTOM GAP FIX & HIDE LOGIC & VISUALS */}
+        {/* Logic: Hidden on mobile when sidebar is open */}
+        <div className={`fixed bottom-0 left-0 right-0 z-30 bg-cerberus-900/95 border-t border-cerberus-700 ${isSidebarOpen ? 'hidden md:block' : 'block'}`}
+             style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
+            
+            <div 
+                className="p-3 transition-all duration-300 mx-auto" 
+                style={{ 
+                    // FIXED WIDTH CALC: Mobile = 100%, Desktop = calc if panel open
+                    // This prevents the "shifting way out" effect on mobile
+                }}
+            >
+                <div className={`
+                    max-w-3xl mx-auto flex items-end gap-2 bg-cerberus-900/40 border border-violet-500/30 rounded-2xl p-1 relative shadow-[0_0_20px_rgba(139,92,246,0.1)]
+                    transition-all duration-300
+                    ${isOOCPanelOpen ? 'md:mr-[25rem]' : ''} 
+                `}>
+                    
+                    <textarea
+                        ref={textareaRef}
+                        value={input}
+                        onChange={handleInputChange}
+                        onKeyDown={handleKeyDown}
+                        onFocus={() => { setKeyboardOpen(true); scrollToBottom(); }}
+                        onBlur={() => setKeyboardOpen(false)}
+                        placeholder={isOOCPanelOpen ? "Telepathic message..." : "Manifest your will..."}
+                        className={`flex-1 bg-transparent border-none focus:ring-0 text-sm text-gray-200 resize-none max-h-32 py-3 px-4 custom-scrollbar tracking-wide font-sans ${
+                            isOOCPanelOpen 
+                                ? 'placeholder-violet-300/30' 
+                                : 'placeholder:font-playfair placeholder:italic placeholder:text-violet-300/50'
+                        }`}
+                        rows={1}
+                    />
+
+                    <div className="shrink-0 mb-1 mr-1">
+                        {isStreaming ? (
+                             <button onClick={handleStop} className="p-2 rounded-full bg-red-900/80 text-white shadow-[0_0_15px_rgba(220,38,38,0.5)] border border-red-500/30 hover:bg-red-700 transition-all">
+                                 <Square size={18} fill="currentColor"/>
+                             </button>
+                        ) : (
+                            // SMART BUTTON: Shows Mic if empty, Send if text
+                            <button 
+                                onClick={handleSmartAction} 
+                                className={`
+                                    p-2 rounded-full border transition-all duration-300
+                                    ${input.trim() 
+                                        ? 'bg-violet-600 border-violet-400 text-white shadow-[0_0_15px_rgba(139,92,246,0.4)] hover:bg-violet-500' // Send State
+                                        : isRecording 
+                                            ? 'bg-red-900 border-red-500 text-white animate-pulse' // Recording State
+                                            : isTranscribing 
+                                                ? 'bg-cerberus-800 border-cerberus-600 animate-spin text-cerberus-accent' // Transcribing State
+                                                : 'bg-transparent border-transparent text-gray-400 hover:text-white hover:bg-white/10' // Mic Idle State
+                                    }
+                                `}
+                                title={input.trim() ? "Send Telepathic Message" : (error || "Voice Input")}
+                            >
+                                {input.trim() ? <Send size={20} /> : (
+                                    isTranscribing ? <RefreshCw size={20}/> : 
+                                    isRecording ? <MicOff size={20}/> : 
+                                    error ? <AlertCircle size={20} onClick={(e) => { e.stopPropagation(); retry(); }} /> : 
+                                    <Mic size={20}/>
+                                )}
+                            </button>
+                        )}
+                    </div>
+                </div>
             </div>
         </div>
 
-        {/* Right Side: Portrait */}
-        <div className="pointer-events-auto flex flex-col items-end gap-2">
-            <div className="transition-transform duration-300 origin-top-right drop-shadow-2xl hover:scale-105">
-                <Portrait url={currentPortraitUrl || character.portraitUrl} scale={portraitScale} aspectRatio={portraitAspectRatio} />
-            </div>
-        </div>
-      </div>
-
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 md:px-16 lg:px-32 pt-48 pb-4 z-0 scroll-smooth custom-scrollbar">
-        {messages.length === 0 && (
-          <div className="h-full flex flex-col items-center justify-center text-cerberus-600 opacity-50 select-none">
-             <Sparkles size={48} className="mb-4 animate-pulse" />
-             <p className="font-serif text-xl drop-shadow-lg">The Void awaits...</p>
-          </div>
-        )}
-
-        {messages.map((msg) => (
-            <MessageItem 
-                key={msg.id}
-                msg={msg}
-                characterName={character.name}
-                isLast={msg.id === lastMessageId}
-                isStreaming={isStreaming}
-                onDelete={onDeleteMessage}
-                onRegenerate={onRegenerate}
-                onVersionChange={onVersionChange}
-                onEdit={onEditMessage}
-                onContinue={onContinueGeneration}
-                aiTextColor={aiTextColor}
-                aiTextStyle={aiTextStyle}
-                aiFontFamily={aiFontFamily}
-                aiTextSize={aiTextSize}
-                userTextColor={userTextColor}
-                userFontFamily={userFontFamily}
-                userTextSize={userTextSize}
-            />
-        ))}
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* Input Area */}
-      <div className="p-3 bg-gradient-to-t from-black via-black/80 to-transparent z-20 shrink-0 flex flex-col items-center">
-        {isScriptorium && (
-            <button onClick={toggleRecording} className={`mb-2 p-2 rounded-full transition-all duration-300 border ${isRecording ? 'bg-red-900 text-white border-red-500 animate-pulse' : 'bg-cerberus-900/80 text-gray-400 border-gray-700 hover:text-white hover:border-cerberus-accent'}`} title={isRecording ? "Stop Recording" : "Start Voice Recording"}>
-                {isRecording ? <MicOff size={18} /> : <Mic size={18} />}
-            </button>
-        )}
-
-        <div className="max-w-4xl w-full mx-auto relative flex items-end gap-2">
-          <textarea ref={textareaRef} value={input} onChange={handleInputChange} onKeyDown={handleKeyDown} onFocus={() => { setKeyboardOpen(true); scrollToBottom(); }} onBlur={() => setKeyboardOpen(false)} placeholder="Whisper..." className="flex-1 bg-cerberus-900/60 backdrop-blur-md border border-cerberus-700/50 text-gray-200 rounded-xl px-4 py-2.5 focus:outline-none focus:border-cerberus-500/50 focus:bg-cerberus-900/80 resize-none shadow-lg text-sm max-h-24 custom-scrollbar" rows={1} disabled={isStreaming} />
-          <button onClick={(e) => isStreaming ? handleStop(e) : handleSubmit()} disabled={!isStreaming && !input.trim()} className={`p-3 rounded-full transition-all duration-300 ease-in-out shrink-0 mb-0.5 flex items-center justify-center ${isStreaming ? 'bg-red-900/90 text-white hover:bg-red-700 shadow-[0_0_20px_rgba(220,38,38,0.5)] border border-red-500/30' : (!input.trim() ? 'text-gray-600 bg-transparent' : 'text-cerberus-900 bg-cerberus-accent hover:bg-white hover:text-cerberus-900 shadow-[0_0_10px_rgba(212,175,55,0.3)]')}`}>
-            <div className="relative w-5 h-5">
-                <span className={`absolute inset-0 flex items-center justify-center transition-all duration-300 transform ${isStreaming ? 'opacity-100 rotate-0 scale-100' : 'opacity-0 rotate-180 scale-50'}`}><Square size={14} fill="currentColor" /></span>
-                <span className={`absolute inset-0 flex items-center justify-center transition-all duration-300 transform ${!isStreaming ? 'opacity-100 rotate-0 scale-100' : 'opacity-0 -rotate-180 scale-50'}`}><Send size={18} /></span>
-            </div>
-          </button>
-        </div>
-      </div>
     </div>
   );
 };

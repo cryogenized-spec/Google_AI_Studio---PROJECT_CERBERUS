@@ -1,4 +1,5 @@
-import { GoogleGenAI, HarmCategory, HarmBlockThreshold, FunctionDeclaration, Type, Tool } from '@google/genai';
+
+import { GoogleGenAI, FunctionDeclaration, Type, Tool } from '@google/genai';
 import { Message, Room, CharacterProfile, AppSettings, MoodState, ScriptoriumTools } from '../types';
 
 // --- Tool Definitions ---
@@ -85,7 +86,7 @@ export const streamGeminiResponse = async (
   const apiKey = settings.apiKeyGemini || process.env.API_KEY;
   
   if (!apiKey) {
-    throw new Error("System configuration error: Gemini API Key missing.");
+    throw new Error("System configuration error: Gemini API Key missing. Please set it in Settings > API Credentials.");
   }
 
   const ai = new GoogleGenAI({ apiKey });
@@ -101,7 +102,6 @@ Location: ${room.name}
 Location Context: ${room.description}
   `.trim();
 
-  // Construct the full system instruction including room context and mood
   const fullSystemInstruction = `
 ${character.systemPrompt}
 
@@ -113,23 +113,25 @@ ${statBlock}
 3. Use the Location Context for sensory details.
 4. User Name: ${settings.userName}
 5. User Description: ${settings.userDescription || "Unknown appearance."}
-6. Response Length: STRICTLY TARGET ${settings.tokenTarget || 300} tokens. You must stay within a +/- 150 token margin of this target. This is an absolute constraint.
+6. **STRICT OUTPUT CONTROL:** 
+   - Your absolute target length is **${settings.tokenTarget || 300} tokens**.
+   - You MUST stay within a margin of error of **+/- 150 tokens** from this target.
 `;
 
-  const history = messages.map(m => ({
-    role: m.role,
-    parts: [{ text: m.content }]
+  // History construction logic:
+  const history = messages.slice(0, -1).map(m => ({
+    role: m.role === 'model' ? 'model' : 'user',
+    parts: [{ text: m.content || "..." }] // Ensure content is never empty
   }));
 
-  const lastMessage = history.pop();
+  const lastMessage = messages[messages.length - 1];
 
   if (!lastMessage) {
       throw new Error("No message to send.");
   }
 
-  // Filter tools based on config
+  // Filter tools
   let activeTools: Tool[] | undefined = undefined;
-  
   if (scriptoriumTools) {
       const declarations: FunctionDeclaration[] = [];
       if (scriptoriumTools.tasks) declarations.push(createTaskTool);
@@ -143,114 +145,144 @@ ${statBlock}
       }
   }
 
-  // Configure Thinking Budget
   const maxTokens = settings.maxOutputTokens || 2048;
   const budgetPercent = settings.thinkingBudgetPercentage || 0;
   const thinkingBudget = Math.floor(maxTokens * (budgetPercent / 100));
 
-  const config: any = {
+  // Determine Safety Threshold based on settings
+  // Using explicit string values to avoid Enum import issues with some bundlers
+  let safetyThreshold = 'BLOCK_NONE'; // Default for OFF
+  
+  if (settings.safetyLevel === 'strict') {
+      safetyThreshold = 'BLOCK_LOW_AND_ABOVE';
+  } else if (settings.safetyLevel === 'standard') {
+      safetyThreshold = 'BLOCK_MEDIUM_AND_ABOVE';
+  }
+  
+  // Base Config
+  const baseConfig: any = {
       systemInstruction: fullSystemInstruction,
       temperature: settings.temperature,
       topP: settings.topP || 0.95,
-      // Note: presencePenalty and frequencyPenalty support depends on the specific model version backend
-      presencePenalty: settings.presencePenalty || 0,
-      frequencyPenalty: settings.frequencyPenalty || 0,
       maxOutputTokens: maxTokens,
       tools: activeTools,
+      // Map new settings
+      topK: settings.topK > 0 ? settings.topK : undefined,
+      stopSequences: settings.stopSequences ? settings.stopSequences.split(',').map(s => s.trim()) : undefined,
       safetySettings: [
-          { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-          { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-          { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-          { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: safetyThreshold },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: safetyThreshold },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: safetyThreshold },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: safetyThreshold },
       ],
   };
 
-  if (thinkingBudget > 0) {
-      config.thinkingConfig = { thinkingBudget: thinkingBudget };
+  // Add penalties only if non-zero
+  if (typeof settings.presencePenalty === 'number' && Math.abs(settings.presencePenalty) > 0.01) {
+      baseConfig.presencePenalty = settings.presencePenalty;
+  }
+  if (typeof settings.frequencyPenalty === 'number' && Math.abs(settings.frequencyPenalty) > 0.01) {
+      baseConfig.frequencyPenalty = settings.frequencyPenalty;
   }
 
-  try {
-    const chat = ai.chats.create({
-        model: settings.modelGemini,
-        config: config,
-        history: history,
-    });
+  if (thinkingBudget > 0) {
+      baseConfig.thinkingConfig = { thinkingBudget: thinkingBudget };
+  }
 
-    const result = await chat.sendMessageStream({ message: lastMessage.parts[0].text });
+  // --- EXECUTION WITH RETRY ---
+  const executeGeneration = async (config: any, isRetry: boolean = false): Promise<string> => {
+      try {
+        const chat = ai.chats.create({
+            model: settings.modelGemini,
+            config: config,
+            history: history,
+        });
 
-    let fullText = "";
-    
-    // Process Stream
-    for await (const chunk of result) {
-      if (signal?.aborted) {
-          throw new Error("Aborted by user");
-      }
-      
-      const functionCalls = chunk.functionCalls;
-      if (functionCalls && functionCalls.length > 0) {
-          const functionResponses = functionCalls.map(fc => {
-             // GENERATE DEEP LINKS
-             let link = "";
-             
-             const args = fc.args as any;
+        const result = await chat.sendMessageStream({ message: lastMessage.content || "..." });
 
-             if (fc.name === 'create_google_task') {
-                 // Using the standalone tasks embed as it works best on mobile/desktop web without sidebar reliance
-                 link = `https://tasks.google.com/embed/?origin=https://mail.google.com&fullWidth=1`;
-             } else if (fc.name === 'draft_gmail') {
-                 const to = encodeURIComponent(args.recipient || '');
-                 const su = encodeURIComponent(args.subject || '');
-                 const body = encodeURIComponent(args.body || '');
-                 link = `https://mail.google.com/mail/?view=cm&fs=1&to=${to}&su=${su}&body=${body}`;
-                 
-             } else if (fc.name === 'create_google_doc') {
-                 link = `https://docs.google.com/document/create`; // Basic create
-                 
-             } else if (fc.name === 'create_calendar_event') {
-                 const text = encodeURIComponent(args.title || 'Meeting');
-                 const details = encodeURIComponent(args.description || '');
-                 const dates = `${(args.start_time || '').replace(/[-:]/g,'')}/${(args.end_time || '').replace(/[-:]/g,'')}`;
-                 link = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${text}&details=${details}`;
-                 
-             } else if (fc.name === 'create_keep_note') {
-                 link = `https://keep.google.com/`;
-             }
+        let fullText = "";
+        for await (const chunk of result) {
+            if (signal?.aborted) throw new Error("Aborted by user");
+            
+            // Handle Tool Calls
+            const functionCalls = chunk.functionCalls;
+            if (functionCalls && functionCalls.length > 0) {
+                const functionResponses = functionCalls.map(fc => {
+                    let link = "";
+                    const args = fc.args as any;
+                    if (fc.name === 'create_google_task') link = `https://tasks.google.com/embed/?origin=https://mail.google.com&fullWidth=1`;
+                    else if (fc.name === 'draft_gmail') {
+                        const to = encodeURIComponent(args.recipient || '');
+                        const su = encodeURIComponent(args.subject || '');
+                        const body = encodeURIComponent(args.body || '');
+                        link = `https://mail.google.com/mail/?view=cm&fs=1&to=${to}&su=${su}&body=${body}`;
+                    } else if (fc.name === 'create_google_doc') link = `https://docs.google.com/document/create`; 
+                    else if (fc.name === 'create_calendar_event') {
+                        const text = encodeURIComponent(args.title || 'Meeting');
+                        const details = encodeURIComponent(args.description || '');
+                        link = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${text}&details=${details}`;
+                    } else if (fc.name === 'create_keep_note') link = `https://keep.google.com/`;
 
-             // INJECT LINK VISIBLY INTO STREAM
-             // Using specific styling request: [ ⚡ Tap here to confirm task execution ] with double newline
-             const markdownLink = `\n\n**[ ⚡ Tap here to confirm task execution ](${link})**\n\n`;
-             fullText += markdownLink;
-             onChunk(markdownLink);
+                    const markdownLink = `\n\n**[ ⚡ Tap here to confirm task execution ](${link})**\n\n`;
+                    fullText += markdownLink;
+                    onChunk(markdownLink);
 
-             return {
-                 id: fc.id,
-                 name: fc.name,
-                 response: { result: "Link Generated and displayed to user.", deepLink: link }
-             };
-          });
+                    return {
+                        id: fc.id,
+                        name: fc.name,
+                        response: { result: "Link Generated.", deepLink: link }
+                    };
+                });
 
-          // Send function execution results back
-          const toolResponse = await chat.sendMessageStream(functionResponses);
-          
-          for await (const toolChunk of toolResponse) {
-              if (toolChunk.text) {
-                  fullText += toolChunk.text;
-                  onChunk(toolChunk.text);
+                const toolResponse = await chat.sendMessageStream(functionResponses);
+                for await (const toolChunk of toolResponse) {
+                    if (toolChunk.text) {
+                        fullText += toolChunk.text;
+                        onChunk(toolChunk.text);
+                    }
+                }
+            } 
+            
+            if (chunk.text) {
+                fullText += chunk.text;
+                onChunk(chunk.text);
+            } else {
+                const candidate = chunk.candidates?.[0];
+                if (candidate && candidate.finishReason) {
+                    if (candidate.finishReason !== 'STOP') {
+                        const safetyMsg = `\n\n*[The entity pauses, restrained by safety protocols. Reason: ${candidate.finishReason}]*`;
+                        fullText += safetyMsg;
+                        onChunk(safetyMsg);
+                    }
+                }
+            }
+        }
+        return fullText;
+
+      } catch (error: any) {
+          // RETRY STRATEGY: If 400 Invalid Argument (likely Penalty), strip them and retry once
+          if (!isRetry && (error.message?.includes('400') || error.message?.includes('INVALID_ARGUMENT'))) {
+              const hasPenalty = config.presencePenalty !== undefined || config.frequencyPenalty !== undefined;
+              if (hasPenalty) {
+                  console.warn("Model rejected penalties. Retrying with clean config...");
+                  const cleanConfig = { ...config };
+                  delete cleanConfig.presencePenalty;
+                  delete cleanConfig.frequencyPenalty;
+                  return executeGeneration(cleanConfig, true);
               }
           }
-      } else if (chunk.text) {
-        fullText += chunk.text;
-        onChunk(chunk.text);
+          throw error;
       }
-    }
-    return fullText;
+  };
 
-  } catch (error) {
-    if (signal?.aborted) {
-        return " [Ritual Interrupted]";
-    }
-    console.error("Gemini API Error:", error);
-    throw error;
+  try {
+      const finalText = await executeGeneration(baseConfig);
+      if (!finalText) return " [Silence. The connection flickers.]";
+      return finalText;
+  } catch (error: any) {
+      if (signal?.aborted) return " [Ritual Interrupted]";
+      console.error("Gemini API Error:", error);
+      throw error;
   }
 };
 

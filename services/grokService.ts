@@ -1,3 +1,4 @@
+
 import { Message, Room, CharacterProfile, AppSettings } from '../types';
 
 export const streamGrokResponse = async (
@@ -33,19 +34,28 @@ ${character.systemPrompt}
     let fullText = "";
 
     try {
+        // Construct body with supported params
+        const body: any = {
+            messages: apiMessages,
+            model: settings.modelGrok,
+            stream: true,
+            temperature: settings.temperature,
+            max_tokens: settings.maxOutputTokens || 2048,
+            top_p: settings.topP || 0.95
+        };
+
+        // Add penalties if supported (Grok beta usually accepts standard OpenAI params)
+        if (settings.presencePenalty) body.presence_penalty = settings.presencePenalty;
+        if (settings.frequencyPenalty) body.frequency_penalty = settings.frequencyPenalty;
+        if (settings.stopSequences) body.stop = settings.stopSequences.split(',').map(s => s.trim());
+
         const response = await fetch('https://api.x.ai/v1/chat/completions', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${settings.apiKeyGrok}`
             },
-            body: JSON.stringify({
-                messages: apiMessages,
-                model: settings.modelGrok,
-                stream: true,
-                temperature: settings.temperature,
-                max_tokens: settings.maxOutputTokens || 2048
-            }),
+            body: JSON.stringify(body),
             signal // Pass the signal to fetch
         });
 

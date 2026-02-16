@@ -1,0 +1,42 @@
+
+{
+  "name": "Project Cerberus",
+  "short_name": "Cerberus",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/public/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/public/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Quick Capture",
+      "short_name": "Quick Capture",
+      "description": "Capture a task or event",
+      "url": "/quick",
+      "icons": [{ "src": "/public/icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Today",
+      "short_name": "Today",
+      "description": "View today's agenda",
+      "url": "/today",
+      "icons": [{ "src": "/public/icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ],
+  "categories": ["entertainment", "productivity", "roleplay"],
+  "description": "A private, immersive roleplay chat application featuring Ysaraith, a succubus entity."
+}

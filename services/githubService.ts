@@ -7,15 +7,16 @@ function utf8_to_b64(str: string) {
 
 export const fetchRepositories = async (token: string): Promise<string[]> => {
     try {
+        const cleanToken = token.trim();
         const response = await fetch('https://api.github.com/user/repos?sort=updated&per_page=100', {
             headers: {
-                'Authorization': `token ${token}`,
+                'Authorization': `token ${cleanToken}`,
                 'Accept': 'application/vnd.github.v3+json'
             }
         });
 
         if (!response.ok) {
-            throw new Error('Failed to fetch repositories');
+            throw new Error(`Failed to fetch repositories: ${response.status} ${response.statusText}`);
         }
 
         const data = await response.json();
@@ -54,23 +55,34 @@ export const uploadFile = async (
     }
 
     // 2. Upload
-    const body: any = {
-        message,
-        content: utf8_to_b64(content),
-    };
-    if (sha) body.sha = sha;
+    try {
+        const body: any = {
+            message,
+            content: utf8_to_b64(content),
+        };
+        if (sha) body.sha = sha;
 
-    const response = await fetch(url, {
-        method: 'PUT',
-        headers: {
-            'Authorization': `token ${token}`,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body)
-    });
+        const response = await fetch(url, {
+            method: 'PUT',
+            headers: {
+                'Authorization': `token ${token}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body)
+        });
 
-    if (!response.ok) {
-        throw new Error(`Failed to upload ${path}`);
+        if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            
+            if (response.status === 404) {
+                throw new Error(`404 Not Found: Could not access "${owner}/${repo}".\n1. Check if Repository Name is correct.\n2. Ensure Token has 'repo' scope permissions.\n3. Verify the repository exists.`);
+            }
+
+            throw new Error(`Failed to upload ${path}: ${response.status} ${response.statusText} - ${JSON.stringify(errData)}`);
+        }
+    } catch (e: any) {
+        console.error("Upload Error Details:", e);
+        throw e;
     }
 };
 
@@ -128,17 +140,24 @@ export const performBackup = async (
 ) => {
     if (!token || !repoFullName) throw new Error("Missing GitHub credentials");
     
-    const [owner, repo] = repoFullName.split('/');
+    // SANITIZE INPUTS
+    const cleanToken = token.trim();
+    const cleanRepo = repoFullName.trim();
+
+    const parts = cleanRepo.split('/');
+    if (parts.length !== 2) throw new Error("Invalid Repository format. Must be 'Owner/Repo'.");
+    const [owner, repo] = parts;
+
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const basePath = 'backups';
 
     // 1. Backup Full State (JSON)
     const stateContent = JSON.stringify(state, null, 2);
-    await uploadFile(token, owner, repo, `${basePath}/cerberus_state.json`, stateContent, `Backup State: ${timestamp}`);
+    await uploadFile(cleanToken, owner, repo, `${basePath}/cerberus_state.json`, stateContent, `Backup State: ${timestamp}`);
 
     // 2. Backup Manifest (JSONC - Human Readable URLs)
     const manifestContent = generateManifestJSONC(state.outfits, state.rooms);
-    await uploadFile(token, owner, repo, `${basePath}/manifest.jsonc`, manifestContent, `Update Manifest: ${timestamp}`);
+    await uploadFile(cleanToken, owner, repo, `${basePath}/manifest.jsonc`, manifestContent, `Update Manifest: ${timestamp}`);
 
     return true;
 };
@@ -148,19 +167,29 @@ export const restoreBackup = async (
     repoFullName: string
 ): Promise<ChatState> => {
     if (!token || !repoFullName) throw new Error("Missing GitHub credentials");
-    const [owner, repo] = repoFullName.split('/');
+    
+    const cleanToken = token.trim();
+    const cleanRepo = repoFullName.trim();
+
+    const parts = cleanRepo.split('/');
+    if (parts.length !== 2) throw new Error("Invalid Repository format. Must be 'Owner/Repo'.");
+    const [owner, repo] = parts;
+
     const path = 'backups/cerberus_state.json';
     const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
 
     const response = await fetch(url, {
         headers: {
-            'Authorization': `token ${token}`,
+            'Authorization': `token ${cleanToken}`,
             'Accept': 'application/vnd.github.v3.raw' // Raw format gets content directly
         }
     });
 
     if (!response.ok) {
-        throw new Error('Failed to fetch backup file');
+        if (response.status === 404) {
+             throw new Error(`Backup file not found at ${path}. Ensure the repository "${owner}/${repo}" exists and a backup has been performed.`);
+        }
+        throw new Error(`Failed to fetch backup file: ${response.status}`);
     }
 
     const data = await response.json();

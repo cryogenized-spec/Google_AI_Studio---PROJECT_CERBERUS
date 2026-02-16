@@ -1,3 +1,5 @@
+
+// ... existing imports ...
 import React, { useState, useRef, useEffect } from 'react';
 import { X, Mic, MicOff, Send, Skull, RotateCw, Trash2, StopCircle, Dices, Menu, Settings, MessageSquare, Plus, Eye, Ghost, Users, BookOpen, Edit2, Check, RotateCcw, RefreshCw, AlertCircle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
@@ -20,7 +22,7 @@ interface DungeonOverlayProps {
     onSelectThread: (id: string) => void;
     onCreateThread: () => void;
     onUpdateConfig: (cfg: DungeonConfig) => void;
-    appSettings: AppSettings; // Passed to style Ysaraith correctly
+    appSettings: AppSettings; 
 }
 
 type Perspective = 'Gareth' | 'Ysaraith' | 'Table';
@@ -28,18 +30,16 @@ type Perspective = 'Gareth' | 'Ysaraith' | 'Table';
 const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
     isOpen, onClose, activeThread, dungeonThreads, config, isStreaming, onSendMessage, onTriggerDM, onClearMessages, onStopGeneration, enterToSend, onSelectThread, onCreateThread, onUpdateConfig, appSettings
 }) => {
-    // UI State
+    // ... existing UI state ...
     const [input, setInput] = useState('');
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [perspective, setPerspective] = useState<Perspective>('Gareth');
     
-    // Demeanor Editing State
     const [editDemeanorLabel, setEditDemeanorLabel] = useState(config.ysaraithDemeanorLabel);
     const [editDemeanorInfo, setEditDemeanorInfo] = useState(config.ysaraithDemeanorInfo);
     const [isDemeanorDirty, setIsDemeanorDirty] = useState(false);
 
-    // Sync local state when config changes (unless dirty)
     useEffect(() => {
         if (!isDemeanorDirty) {
             setEditDemeanorLabel(config.ysaraithDemeanorLabel);
@@ -47,10 +47,9 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
         }
     }, [config, isDemeanorDirty]);
 
-    // Logic State
     const messagesEndRef = useRef<HTMLDivElement>(null);
     
-    // VTT Hook
+    // VTT Hook - Global Settings
     const { isRecording, isTranscribing, error, startRecording, stopRecording, retry } = useTranscriber({
         mode: appSettings.vttMode || 'browser',
         model: appSettings.transcriptionModel || 'gpt-4o-mini-transcribe',
@@ -66,7 +65,6 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
         }
     }, [activeThread.messages, isOpen]);
 
-    // Initial Auto-Fire if empty
     useEffect(() => {
         if (isOpen && activeThread.messages.length === 0 && !isStreaming) {
             const t = setTimeout(() => onTriggerDM(), 500);
@@ -78,31 +76,30 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
         if (isStreaming) return;
         const rollStatement = "\n\n“I take the dice and make a roll for all my checks as indicated above in the legal sequence, up to and not beyond the rule limitation.”";
         setInput(prev => prev + rollStatement);
-        // Focus the textarea
         const ta = document.getElementById('dungeon-textarea');
         if (ta) ta.focus();
     };
 
-    const toggleRecording = () => {
-        if (isRecording) {
+    // Smart Button Logic
+    const handleSmartAction = () => {
+        if (input.trim() && !isStreaming) {
+            onSendMessage(input); 
+            setInput('');
+        } else if (isRecording) {
             stopRecording();
         } else {
             startRecording();
         }
     };
 
-    // --- Demeanor Logic ---
+    // ... (Other handlers unchanged: handleDemeanorSelect, handleDemeanorInfoChange, handleSaveDemeanor, handleCancelDemeanor, parseContentForPerspective, getFontFamily, getMessageStyle) ...
     const handleDemeanorSelect = (label: string) => {
-        // If selecting a preset, fill the info. 
-        // If selecting current custom, keep it.
         const presetInfo = DEMEANOR_PRESETS[label as keyof typeof DEMEANOR_PRESETS];
-        
         if (presetInfo) {
             setEditDemeanorLabel(label);
             setEditDemeanorInfo(presetInfo);
             setIsDemeanorDirty(true);
         } else if (label === 'Custom' || label === config.ysaraithDemeanorLabel) {
-             // Just switch label context, keep info
              setEditDemeanorLabel(label);
         }
     };
@@ -110,9 +107,6 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
     const handleDemeanorInfoChange = (text: string) => {
         setEditDemeanorInfo(text);
         setIsDemeanorDirty(true);
-        
-        // If the text no longer matches the current label's preset, switch label to "Custom"
-        // unless we are already editing a custom name
         const isPreset = Object.keys(DEMEANOR_PRESETS).includes(editDemeanorLabel);
         if (isPreset && text !== DEMEANOR_PRESETS[editDemeanorLabel as keyof typeof DEMEANOR_PRESETS]) {
             setEditDemeanorLabel("New Setting 1");
@@ -134,8 +128,6 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
         setIsDemeanorDirty(false);
     };
 
-
-    // --- Message Parsing Logic ---
     const parseContentForPerspective = (content: string, role: string) => {
         if (role !== 'model') return content;
         if (!content.includes("Secret (")) return content;
@@ -160,7 +152,6 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
         }).filter(Boolean).join('');
     };
 
-    // Helper to get Google Font family name
     const getFontFamily = (url: string) => {
         if (!url) return '';
         const match = url.match(/family=([^&:]+)/);
@@ -168,19 +159,15 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
         return '';
     };
 
-    // Style Generation
     const getMessageStyle = (speaker: 'DM' | 'Ysaraith' | 'User' | undefined, role: string) => {
         if (speaker === 'DM' || (!speaker && role === 'model' && !activeThread.messages.some(m => m.speaker === 'Ysaraith'))) {
-            // Default to DM style if ambiguous in Dungeon, but prioritize speaker tag
             return { 
                 fontFamily: config.dmFont, 
                 color: config.dmColor, 
                 fontSize: `${config.dmTextSize || 16}px` 
             };
         }
-        
         if (speaker === 'Ysaraith' || (!speaker && role === 'model')) {
-            // Use App Settings for Ysaraith
             const styles: React.CSSProperties = {
                 color: appSettings.aiTextColor,
                 fontFamily: getFontFamily(appSettings.aiTextFontUrl) || "'Playfair Display', serif",
@@ -192,8 +179,6 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
             else if (appSettings.aiTextStyle === 'neon') styles.textShadow = `0 0 5px ${appSettings.aiTextColor}, 0 0 10px ${appSettings.aiTextColor}`;
             return styles;
         }
-
-        // User
         return {
             color: appSettings.userTextColor,
             fontFamily: getFontFamily(appSettings.userTextFontUrl) || "'Inter', sans-serif",
@@ -203,21 +188,18 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
 
     if (!isOpen) return null;
 
-    // Presets for dropdown
     const presetOptions = Object.keys(DEMEANOR_PRESETS);
-    // Add current if it's not in presets
     if (!presetOptions.includes(editDemeanorLabel)) {
         presetOptions.push(editDemeanorLabel);
     }
 
     return (
         <div className="fixed inset-0 z-[100] bg-[#050505] flex overflow-hidden animate-fadeIn font-serif text-gray-300">
-            
-            {/* BACKGROUND */}
+            {/* Background ... */}
             <div className="absolute inset-0 bg-cover bg-center opacity-30 pointer-events-none sepia contrast-125 transition-all duration-700" style={{ backgroundImage: `url(${config.backgroundImage})` }} />
             <div className="absolute inset-0 bg-gradient-to-b from-black via-transparent to-black pointer-events-none opacity-80" />
 
-            {/* LEFT SIDEBAR (THREADS) */}
+            {/* Left Sidebar ... */}
             <div className={`
                 absolute md:relative z-40 w-64 bg-[#0a0a0a] border-r border-[#2a2a2a] h-full flex flex-col transition-transform duration-300
                 ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0 md:w-0 md:opacity-0 md:overflow-hidden'}
@@ -244,10 +226,10 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
                 </div>
             </div>
 
-            {/* MAIN CONTENT AREA */}
+            {/* MAIN CONTENT */}
             <div className="flex-1 flex flex-col relative z-10 w-full">
                 
-                {/* HEADER */}
+                {/* Header ... */}
                 <div className="h-16 border-b border-red-900/30 flex items-center justify-between px-4 bg-black/60 backdrop-blur-md shrink-0">
                     <div className="flex items-center gap-4">
                         <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="text-gray-500 hover:text-white transition-colors">
@@ -260,7 +242,7 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
                     </div>
 
                     <div className="flex items-center gap-2 md:gap-4">
-                        {/* PERSPECTIVE TOGGLE */}
+                        {/* Perspective Toggle ... */}
                         <div className="hidden md:flex bg-black/50 rounded-full border border-gray-800 p-0.5">
                             {(['Gareth', 'Ysaraith', 'Table'] as const).map(p => (
                                 <button
@@ -272,7 +254,6 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
                                 </button>
                             ))}
                         </div>
-                        {/* Mobile Perspective Icon */}
                         <button 
                             className="md:hidden p-2 text-gray-500" 
                             onClick={() => setPerspective(prev => prev === 'Gareth' ? 'Ysaraith' : prev === 'Ysaraith' ? 'Table' : 'Gareth')}
@@ -291,23 +272,19 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
                     </div>
                 </div>
 
-                {/* MESSAGES */}
+                {/* Messages ... */}
                 <div className="flex-1 overflow-y-auto p-4 md:p-12 space-y-12 custom-scrollbar">
                     {activeThread.messages.map(msg => {
                         const isDM = msg.role === 'model' && (msg.speaker === 'DM' || msg.content.includes('IDENTITY: THE KEEPER'));
                         const isYsaraith = msg.role === 'model' && !isDM;
-                        
                         return (
                             <div key={msg.id} className={`flex flex-col ${msg.role === 'model' ? 'items-start' : 'items-end'} animate-fadeIn`}>
                                 <div className={`max-w-4xl w-full ${msg.role === 'model' ? 'text-left' : 'text-right'}`}>
-                                    {/* Avatar/Name */}
                                     <div className={`text-[10px] uppercase tracking-widest font-bold mb-2 flex items-center gap-2 ${msg.role === 'model' ? '' : 'justify-end'}`}>
                                         {isDM && <span className="text-red-700 flex items-center gap-1"><Skull size={12}/> The Keeper</span>}
                                         {isYsaraith && <span className="text-pink-400">Ysaraith</span>}
                                         {msg.role === 'user' && <span className="text-gray-500">Gareth</span>}
                                     </div>
-                                    
-                                    {/* Message Body */}
                                     <div 
                                         className={`
                                             p-6 rounded-sm border shadow-2xl relative
@@ -330,9 +307,8 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
                     <div ref={messagesEndRef} />
                 </div>
 
-                {/* CONTROLS */}
+                {/* CONTROLS (Updated with Smart Button) */}
                 <div className="shrink-0 p-4 pb-6 z-20 relative bg-gradient-to-t from-black via-black/90 to-transparent">
-                    {/* DM PILL */}
                     <div className="absolute -top-14 left-1/2 transform -translate-x-1/2 z-30">
                         <button 
                             onClick={isStreaming ? onStopGeneration : onTriggerDM}
@@ -352,87 +328,59 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
                             <Dices size={20}/>
                         </button>
                         
-                        {/* VTT Button */}
-                        <button 
-                            onClick={toggleRecording} 
-                            className={`
-                                p-3 rounded-full border transition-all duration-300
-                                ${isRecording 
-                                    ? 'bg-red-900 border-red-500 text-white animate-pulse' 
-                                    : isTranscribing 
-                                        ? 'bg-cerberus-800 border-cerberus-600 animate-spin text-cerberus-accent' 
-                                        : error 
-                                            ? 'bg-red-950 border-red-800 text-red-500' 
-                                            : 'bg-transparent border-gray-800 text-gray-600 hover:text-gray-300'
-                                }
-                            `}
-                            title={error ? error : "Voice"}
-                        >
-                            {isTranscribing ? <RefreshCw size={20}/> : 
-                             isRecording ? <MicOff size={20}/> : 
-                             error ? <AlertCircle size={20} onClick={(e) => { e.stopPropagation(); retry(); }} /> : 
-                             <Mic size={20}/>
-                            }
-                        </button>
-
-                        <textarea 
-                            id="dungeon-textarea"
-                            value={input} 
-                            onChange={e => setInput(e.target.value)} 
-                            placeholder={isTranscribing ? "Transcribing..." : "State your action..."}
-                            className="flex-1 bg-transparent border-b border-gray-800 p-3 text-lg font-serif text-gray-300 focus:outline-none focus:border-red-900/50 resize-none h-14 placeholder-gray-800 transition-colors"
-                            disabled={isStreaming || isTranscribing}
-                            onKeyDown={e => { if(e.key === 'Enter' && enterToSend && !e.shiftKey) { e.preventDefault(); if(input.trim() && !isStreaming) { onSendMessage(input); setInput(''); } } }}
-                        />
-                        <button onClick={() => { if(input.trim() && !isStreaming) { onSendMessage(input); setInput(''); } }} className="p-3 text-gray-500 hover:text-white transition-colors">
-                            <Send size={24} />
-                        </button>
+                        <div className="flex-1 flex items-center gap-2 border-b border-gray-800 focus-within:border-red-900/50 transition-colors">
+                            <textarea 
+                                id="dungeon-textarea"
+                                value={input} 
+                                onChange={e => setInput(e.target.value)} 
+                                placeholder={isTranscribing ? "Transcribing..." : "State your action..."}
+                                className="flex-1 bg-transparent p-3 text-lg font-serif text-gray-300 focus:outline-none resize-none h-14 placeholder-gray-800"
+                                disabled={isStreaming || isTranscribing}
+                                onKeyDown={e => { if(e.key === 'Enter' && enterToSend && !e.shiftKey) { e.preventDefault(); handleSmartAction(); } }}
+                            />
+                            {/* SMART BUTTON */}
+                            <button 
+                                onClick={handleSmartAction}
+                                className={`
+                                    p-2 rounded-full transition-all duration-300 
+                                    ${input.trim() 
+                                        ? 'text-red-200 hover:text-white hover:bg-red-900/20' 
+                                        : isRecording 
+                                            ? 'text-red-500 animate-pulse' 
+                                            : isTranscribing
+                                                ? 'text-cerberus-accent animate-spin'
+                                                : 'text-gray-600 hover:text-gray-300'
+                                    }
+                                `}
+                            >
+                                {input.trim() ? <Send size={24}/> : isTranscribing ? <RefreshCw size={24}/> : isRecording ? <MicOff size={24}/> : error ? <AlertCircle size={24} onClick={(e) => { e.stopPropagation(); retry(); }} /> : <Mic size={24}/>}
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
 
-            {/* SETTINGS DRAWER (Right) */}
+            {/* Settings Drawer ... */}
             <div className={`
                 absolute inset-y-0 right-0 z-50 w-80 bg-[#0a0a0a] border-l border-[#2a2a2a] transform transition-transform duration-300 flex flex-col
                 ${isSettingsOpen ? 'translate-x-0' : 'translate-x-full'}
             `}>
+                {/* ... existing settings drawer content ... */}
                 <div className="p-4 border-b border-[#2a2a2a] flex items-center justify-between">
                     <h3 className="font-bold text-gray-200 font-serif tracking-widest uppercase">Table Rules</h3>
                     <button onClick={() => setIsSettingsOpen(false)} className="text-gray-500 hover:text-white"><X size={20}/></button>
                 </div>
                 <div className="p-6 space-y-8 flex-1 overflow-y-auto custom-scrollbar">
                     
-                    {/* Ysaraith Persona */}
                     <div className="space-y-3">
                         <label className="text-xs font-mono text-pink-400 uppercase tracking-widest">Ysaraith's Demeanor</label>
-                        
                         <div className="flex gap-2">
-                            <input 
-                                type="text" 
-                                value={editDemeanorLabel} 
-                                onChange={e => { setEditDemeanorLabel(e.target.value); setIsDemeanorDirty(true); }}
-                                className="flex-1 bg-[#151515] border border-gray-800 rounded p-2 text-sm text-gray-300 focus:border-pink-900 outline-none font-serif"
-                                placeholder="Setting Name"
-                            />
+                            <input type="text" value={editDemeanorLabel} onChange={e => { setEditDemeanorLabel(e.target.value); setIsDemeanorDirty(true); }} className="flex-1 bg-[#151515] border border-gray-800 rounded p-2 text-sm text-gray-300 focus:border-pink-900 outline-none font-serif" placeholder="Setting Name"/>
                         </div>
-                        
-                        <select 
-                            value={editDemeanorLabel} 
-                            onChange={e => handleDemeanorSelect(e.target.value)}
-                            className="w-full bg-[#151515] border border-gray-800 rounded p-2 text-xs text-gray-500 focus:border-pink-900 outline-none mb-2"
-                        >
-                            {presetOptions.map(p => (
-                                <option key={p} value={p}>{p}</option>
-                            ))}
+                        <select value={editDemeanorLabel} onChange={e => handleDemeanorSelect(e.target.value)} className="w-full bg-[#151515] border border-gray-800 rounded p-2 text-xs text-gray-500 focus:border-pink-900 outline-none mb-2">
+                            {presetOptions.map(p => (<option key={p} value={p}>{p}</option>))}
                         </select>
-
-                        <textarea 
-                            value={editDemeanorInfo}
-                            onChange={e => handleDemeanorInfoChange(e.target.value)}
-                            className="w-full h-32 bg-[#151515] border border-gray-800 rounded p-2 text-xs text-gray-400 focus:border-pink-900 outline-none resize-none custom-scrollbar"
-                            placeholder="Prompt instructions..."
-                        />
-                        
+                        <textarea value={editDemeanorInfo} onChange={e => handleDemeanorInfoChange(e.target.value)} className="w-full h-32 bg-[#151515] border border-gray-800 rounded p-2 text-xs text-gray-400 focus:border-pink-900 outline-none resize-none custom-scrollbar" placeholder="Prompt instructions..."/>
                         {isDemeanorDirty && (
                             <div className="flex gap-2 animate-fadeIn">
                                 <button onClick={handleSaveDemeanor} className="flex-1 py-2 bg-pink-900/20 text-pink-400 border border-pink-900/50 rounded text-[10px] uppercase font-bold flex items-center justify-center gap-1 hover:bg-pink-900/40"><Check size={12}/> Save</button>
@@ -442,23 +390,15 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
                         <p className="text-[9px] text-gray-600">Influences her autonomous actions and banter.</p>
                     </div>
 
-                    {/* Environment */}
                     <div className="space-y-3 pt-6 border-t border-[#2a2a2a]">
                         <label className="text-xs font-mono text-gray-400 uppercase tracking-widest">Environment Imagery</label>
-                        <input 
-                            type="text" 
-                            value={config.backgroundImage} 
-                            onChange={e => onUpdateConfig({...config, backgroundImage: e.target.value})}
-                            placeholder="Image URL..."
-                            className="w-full bg-[#151515] border border-gray-800 rounded p-2 text-xs text-gray-300 focus:border-gray-600 outline-none"
-                        />
+                        <input type="text" value={config.backgroundImage} onChange={e => onUpdateConfig({...config, backgroundImage: e.target.value})} placeholder="Image URL..." className="w-full bg-[#151515] border border-gray-800 rounded p-2 text-xs text-gray-300 focus:border-gray-600 outline-none"/>
                         <div className="aspect-video w-full rounded border border-gray-800 overflow-hidden relative">
                             <img src={config.backgroundImage} className="w-full h-full object-cover opacity-50" />
                             <div className="absolute inset-0 flex items-center justify-center text-[10px] text-gray-400">Preview</div>
                         </div>
                     </div>
 
-                    {/* DM Aesthetics */}
                     <div className="space-y-3 pt-6 border-t border-[#2a2a2a]">
                         <label className="text-xs font-mono text-red-900 uppercase tracking-widest">Keeper's Voice</label>
                         <div className="grid grid-cols-2 gap-2">
@@ -481,7 +421,6 @@ const DungeonOverlay: React.FC<DungeonOverlayProps> = ({
                         </div>
                     </div>
 
-                    {/* Operations */}
                     <div className="pt-6 border-t border-[#2a2a2a]">
                         <button onClick={() => { onClearMessages(); setIsSettingsOpen(false); }} className="w-full py-2 border border-red-900/30 text-red-900 hover:bg-red-900/10 hover:text-red-500 rounded text-xs uppercase tracking-widest flex items-center justify-center gap-2 transition-colors">
                             <Trash2 size={14} /> Clear Table

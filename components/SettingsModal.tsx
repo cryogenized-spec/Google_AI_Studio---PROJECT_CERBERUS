@@ -1,3 +1,5 @@
+
+// ... existing imports ...
 import React, { useState, useEffect, useRef } from 'react';
 import { X, CheckCircle, AlertCircle, Save, Plus, Trash2, Github, Sliders, Lock, Unlock, Database, ScrollText, Activity, Power, Terminal, Clock, Maximize, Info, User, HardDrive, Download, Upload, Sparkles, Copy, BrainCircuit, AlignJustify, Code, RotateCcw, RotateCw, Loader2, Edit3, Check, Compass, Mic, Radio, ChevronDown, ChevronRight, Image as ImageIcon, Key, FileText, Zap, MessageSquare, Layers, ShieldAlert, Layout, EyeOff, Eye, Smartphone, Shield } from 'lucide-react';
 import { AppSettings, CharacterProfile, Room, ChatState, FirebaseConfig, ScriptoriumConfig, DeepLogicConfig, ScheduleSettings, RuntimeSettings, MemoryPolicy, ToolSettings, WakeLog, ProfileSlot, QuickPreset } from '../types';
@@ -10,6 +12,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import KeyManager from './KeyManager';
 
 interface SettingsModalProps {
+// ... existing interface ...
   isOpen: boolean;
   onClose: () => void;
   settings: AppSettings;
@@ -32,7 +35,7 @@ interface SettingsModalProps {
 const isDeepEqual = (obj1: any, obj2: any) => JSON.stringify(obj1) === JSON.stringify(obj2);
 const PROFILE_STORAGE_KEY = 'project_cerberus_profiles_v1';
 
-// Modified CollapsibleSection to support locking
+// ... existing CollapsibleSection ...
 interface CollapsibleSectionProps {
     title: React.ReactNode;
     isOpen: boolean;
@@ -148,6 +151,7 @@ const NumericSetting: React.FC<NumericSettingProps> = ({ label, value, min, max,
                     </div>
                 )}
             </div>
+            {/* CHANGED: Accent color returned to red-700 */}
             <input 
                 type="range" 
                 min={min} 
@@ -155,13 +159,14 @@ const NumericSetting: React.FC<NumericSettingProps> = ({ label, value, min, max,
                 step={step} 
                 value={value} 
                 onChange={(e) => onChange(parseFloat(e.target.value))} 
-                className="w-full cursor-pointer accent-cerberus-accent"
+                className="w-full cursor-pointer accent-red-700"
                 disabled={disabled}
             />
         </div>
     );
 };
 
+// ... (getProviderCapabilities remains same) ...
 const getProviderCapabilities = (settings: AppSettings) => {
     const isGemini = settings.activeProvider === 'gemini';
     const isGrok = settings.activeProvider === 'grok';
@@ -183,6 +188,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
     scriptoriumConfig: initialScriptoriumConfig, deepLogicConfig: initialDeepLogicConfig, 
     initialTab, onSave, onRestore, onExportTxt
 }) => {
+  // ... (State declarations remain same) ...
   const [settings, setSettings] = useState<AppSettings>(initialSettings);
   const [character, setCharacter] = useState<CharacterProfile>(initialCharacter);
   const [rooms, setRooms] = useState<Room[]>(initialRooms);
@@ -215,9 +221,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   const [restoreInput, setRestoreInput] = useState('');
   const [manualRepoInput, setManualRepoInput] = useState(false);
   const [isKeyManagerOpen, setIsKeyManagerOpen] = useState(false);
-  
-  const [showGithubToken, setShowGithubToken] = useState(false); // NEW
-
+  const [showGithubToken, setShowGithubToken] = useState(false); 
   const [activeTooltip, setActiveTooltip] = useState<string | null>(null);
   const [showAdvancedInference, setShowAdvancedInference] = useState(false);
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({
@@ -226,8 +230,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
       roleplay: true,
       voice: false,
   });
-  
-  // NEW: Locking State
   const [lockedSections, setLockedSections] = useState<Record<string, boolean>>({});
 
   const toggleSection = (id: string) => setOpenSections(prev => ({ ...prev, [id]: !prev[id] }));
@@ -235,9 +237,12 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   
   const capabilities = getProviderCapabilities(settings);
 
-  // Quick Panel Presets
-  const quickPresets = useLiveQuery(() => db.quick_presets.toArray()) || [];
+  const quickPresets = useLiveQuery(() => {
+      if (!db || !db.quick_presets) return [];
+      return db.quick_presets.toArray();
+  }, []) || [];
 
+  // ... (Effect hooks and helper functions remain same) ...
   useEffect(() => {
       if (isOpen) {
           if (initialTab) setActiveTab(initialTab);
@@ -363,7 +368,9 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
       } else {
           newLayout.push({ id: uuidv4(), type: type as any, size: 'medium' });
       }
-      await db.quick_presets.update(preset.id, { layout: newLayout, updatedAt: Date.now() });
+      if (db && db.quick_presets) {
+          await db.quick_presets.update(preset.id, { layout: newLayout, updatedAt: Date.now() });
+      }
   };
 
   if (!isOpen) return null;
@@ -489,7 +496,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
               </CollapsibleSection>
 
-              {/* ... (Existing Response Config Logic) ... */}
+              {/* ... (Response Tuning - NumericSettings use red-700 via Component change above) ... */}
               <CollapsibleSection 
                   title="Response Tuning" 
                   isOpen={openSections.inference} 
@@ -529,7 +536,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
               </CollapsibleSection>
 
-              {/* ... (Existing Roleplay Config Logic) ... */}
+              {/* ... (Roleplay Config - NumericSettings use red-700) ... */}
               <CollapsibleSection 
                   title="Roleplay & Style" 
                   isOpen={openSections.roleplay} 
@@ -548,7 +555,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
               </CollapsibleSection>
 
-              {/* ... (Existing Voice Config Logic) ... */}
+              {/* ... (Voice Config) ... */}
               <CollapsibleSection 
                   title="Voice Input" 
                   isOpen={openSections.voice} 
@@ -556,17 +563,41 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                   icon={<Mic size={16}/>}
               >
                   <div className="space-y-4">
-                      <div><label className="block text-[10px] font-mono text-cerberus-accent uppercase tracking-wider mb-1">OPENAI API KEY (WHISPER)</label><input type="password" value={settings.apiKeyOpenAI || ''} onChange={(e) => updateSettings({...settings, apiKeyOpenAI: e.target.value})} className="w-full bg-black/50 border border-cerberus-700 rounded p-2 text-white focus:border-cerberus-500 focus:outline-none font-mono text-sm placeholder-gray-700" placeholder="Required for high-quality VTT" /></div>
-                      <div><label className="block text-[10px] font-mono text-cerberus-accent uppercase tracking-wider mb-1">TRANSCRIPTION MODEL</label><select value={settings.transcriptionModel} onChange={e => updateSettings({...settings, transcriptionModel: e.target.value as any})} className="w-full bg-black/50 border border-cerberus-700 rounded p-2 text-sm text-white"><option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe ($0.003/min)</option><option value="gpt-4o-transcribe">gpt-4o-transcribe ($0.006/min)</option></select></div>
+                      <div>
+                          <label className="block text-[10px] font-mono text-cerberus-accent uppercase tracking-wider mb-1">OPENAI API KEY (WHISPER)</label>
+                          <div className="p-3 bg-black/30 border border-cerberus-700 rounded flex justify-between items-center">
+                              <span className="text-xs text-gray-400 font-mono">
+                                  Status: {settings.apiKeyOpenAI ? 'Active (Loaded via Secure Storage)' : 'Not Configured'}
+                              </span>
+                              <button 
+                                  onClick={() => setIsKeyManagerOpen(true)}
+                                  className="text-[10px] bg-cerberus-800 text-white px-2 py-1 rounded hover:bg-cerberus-700 uppercase"
+                              >
+                                  Manage Keys
+                              </button>
+                          </div>
+                      </div>
+                      <div><label className="block text-[10px] font-mono text-cerberus-accent uppercase tracking-wider mb-1">TRANSCRIPTION MODEL</label><select value={settings.transcriptionModel} onChange={e => updateSettings({...settings, transcriptionModel: e.target.value as any})} className="w-full bg-black/50 border border-cerberus-700 rounded p-2 text-sm text-white">
+                          <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe ($0.003/min)</option>
+                          <option value="gpt-4o-transcribe">gpt-4o-transcribe ($0.006/min)</option>
+                      </select></div>
+                      <div>
+                          <label className="block text-[10px] font-mono text-cerberus-accent uppercase tracking-wider mb-1">VTT PROVIDER</label>
+                          <select value={settings.vttMode || 'browser'} onChange={e => updateSettings({...settings, vttMode: e.target.value as any})} className="w-full bg-black/50 border border-cerberus-700 rounded p-2 text-sm text-white">
+                              <option value="browser">Native / Android (Default)</option>
+                              {settings.apiKeyOpenAI && <option value="openai">OpenAI Whisper (Cloud)</option>}
+                              {settings.apiKeyGemini && <option value="gemini">Google Gemini (Cloud)</option>}
+                          </select>
+                      </div>
                       <div className="flex items-center justify-between"><label className="text-[10px] font-mono text-gray-400 uppercase tracking-wider">AUTO-SEND AFTER RECORDING</label><div onClick={() => updateSettings({...settings, vttAutoSend: !settings.vttAutoSend})} className={`w-10 h-5 rounded-full cursor-pointer transition-colors p-1 ${settings.vttAutoSend ? 'bg-cerberus-accent' : 'bg-gray-700'}`}><div className={`w-3 h-3 bg-black rounded-full shadow-md transform transition-transform ${settings.vttAutoSend ? 'translate-x-5' : 'translate-x-0'}`} /></div></div>
                   </div>
               </CollapsibleSection>
             </div>
           )}
-
-          {/* ... (Rest of Tabs unchanged) ... */}
+          {/* ... Rest of tabs ... */}
           {activeTab === 'quickpanel' && (
               <div className="space-y-4">
+                  {/* ... quick panel content ... */}
                   <div className="p-4 bg-cerberus-800/30 border border-cerberus-700 rounded">
                       <h3 className="text-sm font-bold text-white mb-2 flex items-center gap-2"><Smartphone size={16}/> Home Screen Widget</h3>
                       <p className="text-[10px] text-gray-400 mb-4">
@@ -608,9 +639,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
               </div>
           )}
-
-          {/* ... (Character, Appearance, Locations, Scriptorium, Profiles, DeepLogic tabs - assume unchanged) ... */}
-          {/* OMITTED FOR BREVITY, no changes in logic for other tabs, purely UI text/inputs for keys moved */}
+          {/* ... Rest of component ... */}
           {activeTab === 'character' && (
              <div className="space-y-6">
                  <div><label className="block text-[10px] font-mono text-cerberus-accent uppercase tracking-wider mb-1">CHARACTER NAME</label><input type="text" value={character.name} onChange={(e) => updateCharacter({...character, name: e.target.value})} className="w-full bg-black/50 border border-cerberus-700 rounded p-2 text-white focus:border-cerberus-500" /></div>
@@ -647,6 +676,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                    <div className="p-4 bg-black/30 border border-cerberus-800 rounded">
                        <h3 className="flex items-center gap-2 text-white font-serif mb-4"><Github size={20} /> GitHub Backup</h3>
                        <div className="space-y-4">
+                           {/* ... existing github backup code ... */}
                            <div>
                                <label className="block text-[10px] font-mono text-cerberus-accent uppercase tracking-wider mb-1">PERSONAL ACCESS TOKEN</label>
                                <div className="flex gap-2">

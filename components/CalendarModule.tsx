@@ -1,4 +1,5 @@
 
+// ... existing imports ...
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import FullCalendar from '@fullcalendar/react';
 import dayGridPlugin from '@fullcalendar/daygrid';
@@ -10,9 +11,7 @@ import { OrgEvent } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 import { X, Check, Trash2, MapPin } from 'lucide-react';
 
-// --- STYLES INJECTION ---
-// Structural CSS is now loaded via CDN in index.html.
-// We only inject THEME overrides here.
+// ... (FC_THEME_OVERRIDES and other constants remain unchanged) ...
 const FC_THEME_OVERRIDES = `
   :root {
     --fc-border-color: #2d0a0a;
@@ -74,25 +73,20 @@ const ensureStyles = () => {
 };
 
 // --- EFFICIENT NOW TIMER HOOK ---
-// Runs only when active (visible + time view)
-// Aligns updates to the minute boundary to minimize drift and CPU
 function useMinuteAlignedNow(isActive: boolean) {
     const [now, setNow] = useState(() => new Date());
 
     useEffect(() => {
         if (!isActive) return;
 
-        // Sync immediately
         const tick = () => setNow(new Date());
         tick();
 
-        // Calculate delay to next minute boundary
         const nowTs = Date.now();
         const msToNextMinute = 60000 - (nowTs % 60000);
         
         let interval: ReturnType<typeof setInterval> | null = null;
         
-        // Wait for boundary, then tick and start interval
         const timeout = setTimeout(() => {
             tick();
             interval = setInterval(tick, 60000);
@@ -102,7 +96,7 @@ function useMinuteAlignedNow(isActive: boolean) {
             clearTimeout(timeout);
             if (interval) clearInterval(interval);
         };
-    }, [isActive]); // Re-start chain if activity state toggles
+    }, [isActive]);
 
     return now;
 }
@@ -127,10 +121,8 @@ const EventModal: React.FC<EventModalProps> = ({ event, isOpen, onClose, onSave,
             setTitle(event.title || '');
             setLocation(event.location || '');
             
-            // Safe Date Handling
             const now = new Date();
             const s = new Date(event.startAt || now.getTime());
-            // Adjust to local ISO for input
             const sLocal = new Date(s.getTime() - (s.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
             setStart(sLocal);
 
@@ -230,11 +222,8 @@ const CalendarModule: React.FC = () => {
         return () => document.removeEventListener('visibilitychange', handleVisChange);
     }, []);
 
-    // Custom Now Timer
     const now = useMinuteAlignedNow(isTimeGrid && isPageVisible);
 
-    // Calc initial scroll position (Now - 1.5 hours) for context
-    // Computed once on mount to prevent jumping
     const [initialScrollTime] = useState(() => {
         const d = new Date();
         d.setMinutes(d.getMinutes() - 90);
@@ -246,7 +235,6 @@ const CalendarModule: React.FC = () => {
             const startMs = fetchInfo.start.valueOf();
             const endMs = fetchInfo.end.valueOf();
 
-            // Dexie Range Query: Overlap Logic
             const events = await db.events
                 .where('endAt').above(startMs) 
                 .and(e => e.startAt < endMs)   
@@ -318,7 +306,6 @@ const CalendarModule: React.FC = () => {
         });
     };
 
-    // Detect View Changes to optimize timer usage
     const handleDatesSet = (info: any) => {
         const type = info.view.type;
         setIsTimeGrid(type === 'timeGridWeek' || type === 'timeGridDay');
@@ -376,7 +363,6 @@ const CalendarModule: React.FC = () => {
                     eventResize={handleEventResize}
                     datesSet={handleDatesSet}
                     
-                    /* Now Indicator Logic */
                     nowIndicator={true}
                     now={now}
                     scrollTime={initialScrollTime}
@@ -384,9 +370,9 @@ const CalendarModule: React.FC = () => {
                     
                     height="100%"
                     contentHeight="auto"
-                    longPressDelay={500} 
-                    eventLongPressDelay={500}
-                    selectLongPressDelay={500}
+                    longPressDelay={350} // Reduced for better response
+                    eventLongPressDelay={350} // Reduced for better response
+                    selectLongPressDelay={350} // Reduced for better response
                     navLinks={true}
                 />
             </div>

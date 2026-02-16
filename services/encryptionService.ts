@@ -7,7 +7,10 @@ const buf2hex = (buffer: ArrayBuffer) => {
 };
 
 const hex2buf = (hexString: string) => {
-    return new Uint8Array(hexString.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16)));
+    if (!hexString) return new Uint8Array(0);
+    const match = hexString.match(/.{1,2}/g);
+    if (!match) return new Uint8Array(0);
+    return new Uint8Array(match.map(byte => parseInt(byte, 16)));
 };
 
 // PBKDF2 Constants
@@ -40,6 +43,10 @@ export const generateKeyFromPin = async (pin: string, salt: Uint8Array): Promise
 };
 
 export const encryptApiKey = async (apiKey: string, pin: string): Promise<EncryptedData> => {
+    if (!window.isSecureContext) {
+        throw new Error("Encryption requires a Secure Context (HTTPS or Localhost).");
+    }
+
     const salt = window.crypto.getRandomValues(new Uint8Array(SALT_SIZE));
     const iv = window.crypto.getRandomValues(new Uint8Array(IV_SIZE));
     
@@ -67,6 +74,10 @@ export const encryptApiKey = async (apiKey: string, pin: string): Promise<Encryp
 
 export const decryptApiKey = async (encrypted: EncryptedData, pin: string): Promise<string> => {
     try {
+        if (!encrypted.salt || !encrypted.iv || !encrypted.ciphertext) {
+            throw new Error("Corrupted key data.");
+        }
+
         const salt = hex2buf(encrypted.salt);
         const iv = hex2buf(encrypted.iv);
         const ciphertext = hex2buf(encrypted.ciphertext);
@@ -86,6 +97,7 @@ export const decryptApiKey = async (encrypted: EncryptedData, pin: string): Prom
         return dec.decode(decrypted);
     } catch (e) {
         console.error("Decryption Failed", e);
-        throw new Error("Invalid PIN or corrupted data.");
+        // Do not throw generic error here, let the caller handle the failure
+        throw new Error("Invalid PIN");
     }
 };

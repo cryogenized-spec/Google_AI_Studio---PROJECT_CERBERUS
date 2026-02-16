@@ -1,12 +1,13 @@
 
 import Dexie, { Table } from 'dexie';
-import { OrgTask, OrgEvent, OrgNote, OrgList, OrgTag, AssistantMessage, PlanningContext, OutboxEvent, ArchivedItem, QuickPreset, StoredSecret } from '../types';
+import { OrgTask, OrgEvent, OrgNote, OrgNotebook, OrgList, OrgTag, AssistantMessage, PlanningContext, OutboxEvent, ArchivedItem, QuickPreset, StoredSecret } from '../types';
 import { v4 as uuidv4 } from 'uuid';
 
 export class OrganizerDB extends Dexie {
     tasks!: Table<OrgTask>;
     events!: Table<OrgEvent>;
     notes!: Table<OrgNote>;
+    notebooks!: Table<OrgNotebook>;
     lists!: Table<OrgList>;
     tags!: Table<OrgTag>;
     assistant_messages!: Table<AssistantMessage>;
@@ -50,6 +51,16 @@ export class OrganizerDB extends Dexie {
             this.version(5).stores({
                 secrets: 'id'
             });
+
+            // @ts-ignore
+            this.version(6).stores({
+                notes: 'id, type, title, pinned, archived, notebookId, *tags, remindAt, updatedAt, [pinned+updatedAt]',
+                notebooks: 'id, name, updatedAt'
+            }).upgrade(tx => {
+                // Migration logic if strictly needed, but Dexie handles adding new fields gracefully.
+                // We ensure IDs are respected as keys.
+            });
+
         } catch (e) {
             console.error("Dexie Schema Error:", e);
         }
@@ -64,6 +75,13 @@ try {
     console.error("CRITICAL: Failed to create OrganizerDB instance.", e);
     // Fallback to avoid module crash, though functionality will be broken
     dbInstance = new Dexie('FallbackDB') as OrganizerDB; 
+    
+    // Stub tables to prevent access crash
+    const tableNames = ['tasks', 'events', 'notes', 'notebooks', 'lists', 'tags', 'assistant_messages', 'planning_context', 'outbox', 'archived_items', 'quick_presets', 'secrets'];
+    tableNames.forEach(t => {
+        // @ts-ignore
+        dbInstance[t] = { toArray: () => [], get: () => null, put: () => {}, add: () => {}, update: () => {}, delete: () => {}, where: () => ({ equals: () => ({ toArray: () => [] }), between: () => ({ toArray: () => [] }) }) };
+    });
 }
 
 export const db = dbInstance;
@@ -71,43 +89,49 @@ export const db = dbInstance;
 // Register hooks safely
 const registerHooks = () => {
     try {
-        const tablesToMonitor = ['tasks', 'events', 'notes', 'lists', 'tags', 'planning_context'];
+        const tablesToMonitor = ['tasks', 'events', 'notes', 'notebooks', 'lists', 'tags', 'planning_context'];
         
         tablesToMonitor.forEach(tableName => {
             const table = (db as any)[tableName] as Table<any, any>;
-            if (!table) return;
+            if (!table || !table.hook) return; // Hook might be missing on stub
 
             table.hook('creating', (primKey, obj) => {
-                db.outbox.add({
-                    id: uuidv4(),
-                    table: tableName,
-                    action: 'create',
-                    data: obj,
-                    timestamp: Date.now(),
-                    synced: false
-                });
+                if(db.outbox && db.outbox.add) {
+                    db.outbox.add({
+                        id: uuidv4(),
+                        table: tableName,
+                        action: 'create',
+                        data: obj,
+                        timestamp: Date.now(),
+                        synced: false
+                    });
+                }
             });
 
             table.hook('updating', (mods, primKey, obj) => {
-                db.outbox.add({
-                    id: uuidv4(),
-                    table: tableName,
-                    action: 'update',
-                    data: { id: primKey, ...mods },
-                    timestamp: Date.now(),
-                    synced: false
-                });
+                if(db.outbox && db.outbox.add) {
+                    db.outbox.add({
+                        id: uuidv4(),
+                        table: tableName,
+                        action: 'update',
+                        data: { id: primKey, ...mods },
+                        timestamp: Date.now(),
+                        synced: false
+                    });
+                }
             });
 
             table.hook('deleting', (primKey) => {
-                db.outbox.add({
-                    id: uuidv4(),
-                    table: tableName,
-                    action: 'delete',
-                    data: { id: primKey },
-                    timestamp: Date.now(),
-                    synced: false
-                });
+                if(db.outbox && db.outbox.add) {
+                    db.outbox.add({
+                        id: uuidv4(),
+                        table: tableName,
+                        action: 'delete',
+                        data: { id: primKey },
+                        timestamp: Date.now(),
+                        synced: false
+                    });
+                }
             });
         });
     } catch(e) {
@@ -129,41 +153,61 @@ export const initializeOrganizer = async () => {
         registerHooks();
         isInitialized = true;
         
-        // Seed Defaults
-        const count = await db.lists.count();
-        if (count === 0) {
-            await db.lists.bulkAdd([
-                { id: 'inbox', name: 'Inbox', sortOrder: 0, createdAt: Date.now() },
-                { id: 'personal', name: 'Personal', sortOrder: 1, createdAt: Date.now() },
-                { id: 'work', name: 'Work', sortOrder: 2, createdAt: Date.now() }
-            ]);
+        // Seed Defaults (Check table exists first)
+        if (db.lists) {
+            const count = await db.lists.count();
+            if (count === 0) {
+                await db.lists.bulkAdd([
+                    { id: 'inbox', name: 'Inbox', sortOrder: 0, createdAt: Date.now() },
+                    { id: 'personal', name: 'Personal', sortOrder: 1, createdAt: Date.now() },
+                    { id: 'work', name: 'Work', sortOrder: 2, createdAt: Date.now() }
+                ]);
+            }
         }
 
-        const contextCount = await db.planning_context.count();
-        if (contextCount === 0) {
-            await db.planning_context.put({
-                id: 'default',
-                workHours: '09:00-17:00',
-                sleepWindow: '23:00-07:00',
-                preferences: '',
-                privacy: { allowCalendar: true, allowTasks: true, allowNotes: true },
-                updatedAt: Date.now()
-            });
+        if (db.planning_context) {
+            const contextCount = await db.planning_context.count();
+            if (contextCount === 0) {
+                await db.planning_context.put({
+                    id: 'default',
+                    workHours: '09:00-17:00',
+                    sleepWindow: '23:00-07:00',
+                    preferences: '',
+                    privacy: { allowCalendar: true, allowTasks: true, allowNotes: true },
+                    updatedAt: Date.now()
+                });
+            }
         }
         
-        const presetCount = await db.quick_presets.count();
-        if (presetCount === 0) {
-            await db.quick_presets.put({
-                id: 'default',
-                name: 'Default',
-                layout: [
-                    { id: 'mic_main', type: 'mic', size: 'large' },
-                    { id: 'today_summary', type: 'today_list', size: 'medium' }
-                ],
-                createdAt: Date.now(),
-                updatedAt: Date.now()
-            });
+        if (db.quick_presets) {
+            const presetCount = await db.quick_presets.count();
+            if (presetCount === 0) {
+                await db.quick_presets.put({
+                    id: 'default',
+                    name: 'Default',
+                    layout: [
+                        { id: 'mic_main', type: 'mic', size: 'large' },
+                        { id: 'today_summary', type: 'today_list', size: 'medium' }
+                    ],
+                    createdAt: Date.now(),
+                    updatedAt: Date.now()
+                });
+            }
         }
+        
+        // Seed Notebooks if empty
+        if (db.notebooks) {
+            const notebookCount = await db.notebooks.count();
+            if (notebookCount === 0) {
+                await db.notebooks.add({
+                    id: 'journal',
+                    name: 'Journal',
+                    createdAt: Date.now(),
+                    updatedAt: Date.now()
+                });
+            }
+        }
+
     } catch (e) {
         console.error("DB Init Failed", e);
     }
@@ -225,13 +269,14 @@ export const exportOrganizerData = async (): Promise<string> => {
             tasks: await db.tasks.toArray(),
             events: await db.events.toArray(),
             notes: await db.notes.toArray(),
+            notebooks: await db.notebooks.toArray(),
             lists: await db.lists.toArray(),
             tags: await db.tags.toArray(),
             assistant_messages: await db.assistant_messages.toArray(),
             planning_context: await db.planning_context.toArray(),
             quick_presets: await db.quick_presets.toArray(),
             exportedAt: Date.now(),
-            version: 3
+            version: 6
         };
         return JSON.stringify(data, null, 2);
     } catch (e) {
@@ -245,10 +290,10 @@ export const importOrganizerData = async (jsonStr: string, merge: boolean = fals
         if (!data.version || !data.tasks) throw new Error("Invalid Format");
 
         // Fix TS Error: transaction not on type
-        await (db as any).transaction('rw', db.tasks, db.events, db.notes, db.lists, db.tags, db.assistant_messages, db.planning_context, db.quick_presets, async () => {
+        await (db as any).transaction('rw', db.tasks, db.events, db.notes, db.notebooks, db.lists, db.tags, db.assistant_messages, db.planning_context, db.quick_presets, async () => {
             if (!merge) {
                 await Promise.all([
-                    db.tasks.clear(), db.events.clear(), db.notes.clear(),
+                    db.tasks.clear(), db.events.clear(), db.notes.clear(), db.notebooks.clear(),
                     db.lists.clear(), db.tags.clear(), db.assistant_messages.clear(),
                     db.planning_context.clear(), db.quick_presets.clear()
                 ]);
@@ -256,6 +301,7 @@ export const importOrganizerData = async (jsonStr: string, merge: boolean = fals
             if (data.tasks) await db.tasks.bulkPut(data.tasks);
             if (data.events) await db.events.bulkPut(data.events);
             if (data.notes) await db.notes.bulkPut(data.notes);
+            if (data.notebooks) await db.notebooks.bulkPut(data.notebooks);
             if (data.lists) await db.lists.bulkPut(data.lists);
             if (data.tags) await db.tags.bulkPut(data.tags);
             if (data.assistant_messages) await db.assistant_messages.bulkPut(data.assistant_messages);

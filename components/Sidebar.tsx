@@ -42,21 +42,21 @@ const Sidebar: React.FC<SidebarProps> = ({
       {/* Mobile Overlay */}
       {isOpen && (
         <div 
-          className="fixed inset-0 bg-black/50 z-20 md:hidden backdrop-blur-sm"
+          className="fixed inset-0 bg-black/50 z-[90] md:hidden backdrop-blur-sm"
           onClick={onClose}
         />
       )}
 
-      {/* Sidebar Content */}
+      {/* Sidebar Content - Z-Index bumped to 100 to sit above Chat Header (z-50) */}
       <div className={`
-        fixed inset-y-0 left-0 z-30 w-72 bg-cerberus-900 border-r border-cerberus-800 transform transition-transform duration-300 ease-in-out flex flex-col
+        fixed inset-y-0 left-0 z-[100] w-72 bg-cerberus-900 border-r border-cerberus-800 transform transition-transform duration-300 ease-in-out flex flex-col
         md:relative md:translate-x-0
         ${isOpen ? 'translate-x-0' : '-translate-x-full'}
       `}>
         <div className="p-4 border-b border-cerberus-700 flex justify-between items-center">
           <h1 className="text-xl font-serif text-cerberus-accent font-bold tracking-widest">CERBERUS</h1>
-          <button onClick={onClose} className="md:hidden text-gray-400 hover:text-white">
-            <X size={20} />
+          <button onClick={onClose} className="md:hidden text-gray-400 hover:text-white p-2">
+            <X size={24} />
           </button>
         </div>
 

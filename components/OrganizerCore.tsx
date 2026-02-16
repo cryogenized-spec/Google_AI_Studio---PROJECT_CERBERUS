@@ -3,14 +3,15 @@ import React, { useState, useEffect, Suspense, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, archiveOldTasks } from '../services/organizerDb';
 import { OrgTask, OrgEvent, OrgNote, AssistantMode, AssistantMessage, ActionProposal, AppSettings, CharacterProfile } from '../types';
-import { Layout, Calendar as CalendarIcon, CheckSquare, FileText, Search, Plus, Bell, ChevronRight, Check, X, Clock, MapPin, Tag, Flag, Bot, Mic, MicOff, Send, Wand2, Edit2, Trash2, Settings, Shield, Sliders, Archive, UploadCloud, Loader2, RefreshCw, MessageCircle } from 'lucide-react';
+import { Layout, Calendar as CalendarIcon, CheckSquare, FileText, Search, Plus, Bell, ChevronRight, Check, X, Clock, MapPin, Tag, Flag, Bot, Mic, MicOff, Send, Wand2, Edit2, Trash2, Settings, Shield, Sliders, Archive, UploadCloud, Loader2, RefreshCw, MessageCircle, AlertCircle } from 'lucide-react';
 import { v4 as uuidv4 } from 'uuid';
 import { processAssistantRequest, executeAction, refineText, analyzeQuickIntent } from '../services/assistantService';
 import { useTranscriber } from '../hooks/useTranscriber';
 import { checkReminders, requestNotificationPermission } from '../services/notificationService';
 
-// Lazy Load Calendar
+// Lazy Load Modules
 const CalendarModule = React.lazy(() => import('./CalendarModule'));
+const NotesModule = React.lazy(() => import('./NotesModule'));
 
 // --- SUB-COMPONENTS ---
 
@@ -52,18 +53,6 @@ const EventItem: React.FC<EventItemProps> = ({ event }) => (
             <h4 className="text-sm font-bold text-white">{event.title}</h4>
             {event.location && <div className="text-[10px] text-gray-500 flex items-center gap-1"><MapPin size={10}/> {event.location}</div>}
         </div>
-    </div>
-);
-
-interface NoteCardProps {
-    note: OrgNote;
-}
-
-const NoteCard: React.FC<NoteCardProps> = ({ note }) => (
-    <div className="bg-cerberus-800/20 border border-cerberus-800 p-3 rounded h-32 flex flex-col relative group hover:border-cerberus-600 transition-colors overflow-hidden">
-        {note.title && <h4 className="font-bold text-xs text-gray-300 mb-1 truncate">{note.title}</h4>}
-        <p className="text-[10px] text-gray-500 line-clamp-5 whitespace-pre-wrap">{note.body}</p>
-        {note.pinned && <div className="absolute top-2 right-2 text-cerberus-accent"><Flag size={10} fill="currentColor"/></div>}
     </div>
 );
 
@@ -227,12 +216,14 @@ const AssistantView = () => {
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const settings = JSON.parse(localStorage.getItem('project_cerberus_state_v5') || '{}').settings || {} as AppSettings;
 
-    // VTT
-    const { isRecording, startRecording, stopRecording } = useTranscriber({
-        mode: 'browser',
-        onInputUpdate: (t) => setInput(prev => prev + ' ' + t),
-        onSend: () => {},
-        autoSend: false
+    // VTT - Global Settings
+    const { isRecording, isTranscribing, error, startRecording, stopRecording, retry } = useTranscriber({
+        mode: settings.vttMode || 'browser',
+        model: settings.transcriptionModel || 'gpt-4o-mini-transcribe',
+        apiKey: settings.vttMode === 'gemini' ? settings.apiKeyGemini : settings.apiKeyOpenAI,
+        onInputUpdate: (t) => setInput(prev => prev + (prev ? ' ' : '') + t),
+        onSend: () => handleSend(), 
+        autoSend: settings.vttAutoSend || false
     });
 
     useEffect(() => {
@@ -267,6 +258,12 @@ const AssistantView = () => {
         }
     };
 
+    const handleSmartAction = () => {
+        if (input.trim()) handleSend();
+        else if (isRecording) stopRecording();
+        else startRecording();
+    };
+
     const handleApprove = async (proposal: ActionProposal, msgId: string) => {
         await executeAction(proposal);
         // Update message proposals status (complex because arrays in dexie need replace)
@@ -291,14 +288,6 @@ const AssistantView = () => {
         }
     };
 
-    const handleWand = async () => {
-        if (!input.trim()) return;
-        setIsProcessing(true);
-        const refined = await refineText(input, settings);
-        setInput(refined);
-        setIsProcessing(false);
-    };
-
     const handleArchiveRun = async () => {
         if (confirm("Archive completed tasks older than 3 months?")) {
             await archiveOldTasks(3);
@@ -309,6 +298,20 @@ const AssistantView = () => {
     return (
         <div className="flex flex-col h-full bg-cerberus-900/50 relative">
             
+            {/* RECORDING OVERLAY */}
+            {isRecording && (
+                <div className="absolute inset-0 z-[60] bg-black/60 backdrop-blur-md flex flex-col items-center justify-end pb-32 animate-fadeIn">
+                    <div className="relative">
+                        <div className="absolute inset-0 bg-violet-500 rounded-full animate-ping opacity-20 delay-100"></div>
+                        <div className="absolute inset-[-20px] bg-violet-500 rounded-full animate-ping opacity-10 delay-300"></div>
+                        <div className="absolute inset-[-40px] bg-violet-500 rounded-full animate-ping opacity-5 delay-500"></div>
+                        <button onClick={stopRecording} className="relative w-24 h-24 bg-violet-900 rounded-full flex items-center justify-center text-white shadow-[0_0_50px_rgba(139,92,246,0.6)] hover:scale-105 transition-transform border-2 border-violet-500"><Mic size={40} className="drop-shadow-lg" /></button>
+                    </div>
+                    <h2 className="mt-8 text-2xl font-serif tracking-[0.2em] text-violet-200 font-bold animate-pulse">LISTENING...</h2>
+                    <p className="mt-2 text-xs font-mono text-violet-300/70 tracking-widest">TAP TO STOP</p>
+                </div>
+            )}
+
             {/* Context Panel Modal */}
             {isContextOpen && (
                 <div className="absolute inset-0 z-50 bg-black/90 backdrop-blur p-6 animate-fadeIn overflow-y-auto">
@@ -340,10 +343,6 @@ const AssistantView = () => {
                                     <div className="flex justify-between items-center bg-cerberus-900 p-2 rounded">
                                         <span className="text-sm flex items-center gap-2"><Archive size={14}/> Archive Old Tasks</span>
                                         <button onClick={handleArchiveRun} className="text-xs uppercase text-gray-400 border border-cerberus-800 px-2 py-1 rounded hover:text-white">Run</button>
-                                    </div>
-                                    <div className="flex justify-between items-center bg-cerberus-900 p-2 rounded">
-                                        <span className="text-sm flex items-center gap-2"><UploadCloud size={14}/> Outbox Sync</span>
-                                        <span className="text-xs text-gray-500">Auto (Pending)</span>
                                     </div>
                                 </div>
                             </div>
@@ -395,23 +394,22 @@ const AssistantView = () => {
 
             {/* Composer */}
             <div className="p-3 border-t border-cerberus-800 bg-cerberus-900 shrink-0">
-                <div className="flex gap-2 items-end">
-                    <button onClick={isRecording ? stopRecording : startRecording} className={`p-3 rounded-full ${isRecording ? 'bg-red-900 text-white animate-pulse' : 'bg-gray-800 text-gray-400'}`}>
-                        {isRecording ? <MicOff size={20}/> : <Mic size={20}/>}
-                    </button>
-                    <div className="flex-1 bg-black/50 border border-cerberus-700 rounded-2xl flex items-center pr-2">
-                        <input 
-                            value={input}
-                            onChange={e => setInput(e.target.value)}
-                            onKeyDown={e => e.key === 'Enter' && handleSend()}
-                            placeholder={`Type to ${mode}...`}
-                            className="flex-1 bg-transparent p-3 text-sm text-white focus:outline-none"
-                        />
-                        <button onClick={handleWand} className="p-2 text-cerberus-600 hover:text-cerberus-accent" title="Magic Wand: Structure Text"><Wand2 size={16}/></button>
+                <div className="bg-cerberus-800/30 border border-cerberus-700 rounded-2xl flex items-center pr-2 relative shadow-lg">
+                    <input 
+                        value={input}
+                        onChange={e => setInput(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && handleSend()}
+                        placeholder={`Type to ${mode}...`}
+                        className="flex-1 bg-transparent p-3 pl-4 text-sm text-white focus:outline-none"
+                    />
+                    <div className="shrink-0 flex items-center">
+                        <button 
+                            onClick={handleSmartAction}
+                            className={`p-2 rounded-full transition-all duration-300 ${input.trim() ? 'bg-violet-600 text-white hover:bg-violet-500' : isRecording ? 'bg-red-900 text-white animate-pulse' : isTranscribing ? 'bg-cerberus-800 text-cerberus-accent animate-spin' : 'text-gray-400 hover:text-white'}`}
+                        >
+                            {input.trim() ? <Send size={20}/> : isTranscribing ? <RefreshCw size={20}/> : isRecording ? <MicOff size={20}/> : error ? <AlertCircle size={20} onClick={(e) => {e.stopPropagation(); retry();}}/> : <Mic size={20}/>}
+                        </button>
                     </div>
-                    <button onClick={handleSend} disabled={!input.trim()} className="p-3 rounded-full bg-cerberus-600 text-white disabled:opacity-50 disabled:bg-gray-800">
-                        <Send size={20}/>
-                    </button>
                 </div>
             </div>
         </div>
@@ -453,21 +451,9 @@ const TasksView = () => {
     );
 };
 
-const NotesView = () => {
-    const notes = useLiveQuery(() => db.notes.orderBy('updatedAt').reverse().toArray()) || [];
-    
-    return (
-        <div className="flex flex-col h-full">
-            <div className="p-4 border-b border-cerberus-800">
-                <h2 className="text-sm font-bold uppercase tracking-widest text-gray-400">Notes & Thoughts</h2>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4 custom-scrollbar pb-20">
-                <div className="grid grid-cols-2 gap-3">
-                    {notes.map(n => <NoteCard key={n.id} note={n} />)}
-                </div>
-            </div>
-        </div>
-    );
+// NotesView is replaced by the NotesModule below, but kept here if fallback needed (it's unused in active render)
+const LegacyNotesView = () => {
+    return null;
 };
 
 // --- MAIN SHELL ---
@@ -482,12 +468,14 @@ export default function OrganizerCore() {
     const [qaPlan, setQaPlan] = useState<any>(null);
     const settings = JSON.parse(localStorage.getItem('project_cerberus_state_v5') || '{}').settings || {} as AppSettings;
 
-    // VTT for Quick Add
-    const { isRecording, startRecording, stopRecording } = useTranscriber({
-        mode: 'browser',
+    // VTT for Quick Add - Global Settings
+    const { isRecording, isTranscribing, error, startRecording, stopRecording, retry } = useTranscriber({
+        mode: settings.vttMode || 'browser',
+        model: settings.transcriptionModel || 'gpt-4o-mini-transcribe',
+        apiKey: settings.vttMode === 'gemini' ? settings.apiKeyGemini : settings.apiKeyOpenAI,
         onInputUpdate: (t) => setQaInput(prev => prev + (prev ? ' ' : '') + t),
-        onSend: () => {}, 
-        autoSend: false
+        onSend: () => handleQuickAnalyze(), 
+        autoSend: settings.vttAutoSend || false
     });
 
     // Notifications Check (Foreground Poll)
@@ -511,6 +499,12 @@ export default function OrganizerCore() {
         }
     };
 
+    const handleSmartAction = () => {
+        if (qaInput.trim()) handleQuickAnalyze();
+        else if (isRecording) stopRecording();
+        else startRecording();
+    };
+
     const handleConfirmPlan = async () => {
         if (!qaPlan) return;
         
@@ -518,8 +512,6 @@ export default function OrganizerCore() {
             // 1. Create Main Task or Event
             const mainId = uuidv4();
             
-            // If it has specific time duration, schedule event. If just due date, task.
-            // Using logic: startAt/endAt present = Event.
             if (qaPlan.startAt && qaPlan.endAt) {
                 await db.events.add({
                     id: mainId,
@@ -570,12 +562,32 @@ export default function OrganizerCore() {
     return (
         <div className="flex flex-col h-full bg-cerberus-void text-gray-200 font-sans relative">
             
+            {/* RECORDING OVERLAY */}
+            {isRecording && (
+                <div className="absolute inset-0 z-[60] bg-black/60 backdrop-blur-md flex flex-col items-center justify-end pb-32 animate-fadeIn">
+                    <div className="relative">
+                        <div className="absolute inset-0 bg-violet-500 rounded-full animate-ping opacity-20 delay-100"></div>
+                        <div className="absolute inset-[-20px] bg-violet-500 rounded-full animate-ping opacity-10 delay-300"></div>
+                        <div className="absolute inset-[-40px] bg-violet-500 rounded-full animate-ping opacity-5 delay-500"></div>
+                        <button onClick={stopRecording} className="relative w-24 h-24 bg-violet-900 rounded-full flex items-center justify-center text-white shadow-[0_0_50px_rgba(139,92,246,0.6)] hover:scale-105 transition-transform border-2 border-violet-500"><Mic size={40} className="drop-shadow-lg" /></button>
+                    </div>
+                    <h2 className="mt-8 text-2xl font-serif tracking-[0.2em] text-violet-200 font-bold animate-pulse">LISTENING...</h2>
+                    <p className="mt-2 text-xs font-mono text-violet-300/70 tracking-widest">TAP TO STOP</p>
+                </div>
+            )}
+
             {/* Content Area */}
             <div className="flex-1 overflow-hidden relative">
                 {activeTab === 'agenda' && <AgendaView />}
                 {activeTab === 'calendar' && <CalendarView />}
                 {activeTab === 'tasks' && <TasksView />}
-                {activeTab === 'notes' && <NotesView />}
+                
+                {activeTab === 'notes' && (
+                    <Suspense fallback={<div className="h-full flex items-center justify-center"><Loader2 className="animate-spin text-cerberus-accent"/></div>}>
+                        <NotesModule />
+                    </Suspense>
+                )}
+                
                 {activeTab === 'assistant' && <AssistantView />}
                 {activeTab === 'search' && <div className="p-8 text-center text-gray-500 italic">Search Index Building...</div>}
             </div>
@@ -596,37 +608,39 @@ export default function OrganizerCore() {
                         {/* PHASE: IDLE or FOLLOWUP (Input) */}
                         {(qaState === 'idle' || qaState === 'followup') && (
                             <div className="space-y-4 animate-fadeIn">
-                                <textarea 
-                                    rows={3}
-                                    autoFocus
-                                    value={qaInput}
-                                    onChange={e => setQaInput(e.target.value)}
-                                    placeholder={qaState === 'followup' ? "Add corrections or details..." : "Speak or type your intent..."}
-                                    className="w-full bg-black/50 border border-cerberus-700 rounded p-3 text-sm text-white focus:border-cerberus-accent outline-none resize-none"
-                                />
-                                <div className="flex justify-between items-center">
-                                    <button 
-                                        onClick={isRecording ? stopRecording : startRecording} 
-                                        className={`p-3 rounded-full transition-colors ${isRecording ? 'bg-red-900 text-white animate-pulse' : 'bg-gray-800 text-gray-400 hover:text-white'}`}
-                                    >
-                                        {isRecording ? <MicOff size={20}/> : <Mic size={20}/>}
-                                    </button>
-                                    
-                                    <div className="flex gap-2">
-                                        {qaState === 'followup' && (
-                                            <button onClick={() => setQaState('review')} className="px-4 py-2 text-xs uppercase font-bold text-gray-400 hover:text-white">
-                                                Cancel
-                                            </button>
-                                        )}
+                                {/* UNIFIED INPUT BAR */}
+                                <div className="bg-black/50 border border-cerberus-700 rounded-2xl flex items-center pr-2 relative shadow-lg">
+                                    <textarea 
+                                        rows={1}
+                                        autoFocus
+                                        value={qaInput}
+                                        onChange={e => setQaInput(e.target.value)}
+                                        placeholder={qaState === 'followup' ? "Add corrections or details..." : "Speak or type your intent..."}
+                                        className="flex-1 bg-transparent p-3 pl-4 text-sm text-white focus:outline-none resize-none max-h-32 custom-scrollbar"
+                                        onKeyDown={(e) => {
+                                            // Auto-grow
+                                            e.currentTarget.style.height = 'auto';
+                                            e.currentTarget.style.height = e.currentTarget.scrollHeight + 'px';
+                                            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSmartAction(); }
+                                        }}
+                                    />
+                                    <div className="shrink-0 flex items-center">
                                         <button 
-                                            onClick={handleQuickAnalyze} 
-                                            disabled={!qaInput.trim()}
-                                            className="px-6 py-2 bg-cerberus-600 text-white font-bold rounded text-xs uppercase hover:bg-cerberus-500 transition-colors disabled:opacity-50 flex items-center gap-2"
+                                            onClick={handleSmartAction}
+                                            className={`p-2 rounded-full transition-all duration-300 ${qaInput.trim() ? 'bg-violet-600 text-white hover:bg-violet-500' : isRecording ? 'bg-red-900 text-white animate-pulse' : isTranscribing ? 'bg-cerberus-800 text-cerberus-accent animate-spin' : 'text-gray-400 hover:text-white'}`}
                                         >
-                                            <Send size={14}/> {qaState === 'followup' ? 'Update' : 'Send'}
+                                            {qaInput.trim() ? <Send size={20}/> : isTranscribing ? <RefreshCw size={20}/> : isRecording ? <MicOff size={20}/> : error ? <AlertCircle size={20} onClick={(e) => {e.stopPropagation(); retry();}}/> : <Mic size={20}/>}
                                         </button>
                                     </div>
                                 </div>
+                                
+                                {qaState === 'followup' && (
+                                    <div className="flex justify-end">
+                                        <button onClick={() => setQaState('review')} className="text-xs uppercase font-bold text-gray-500 hover:text-white">
+                                            Cancel Update
+                                        </button>
+                                    </div>
+                                )}
                             </div>
                         )}
 

@@ -132,13 +132,39 @@ export interface OrgEvent {
     updatedAt: number;
 }
 
+export type NoteType = 'text' | 'checklist' | 'voice' | 'image';
+
+export interface ChecklistItem {
+    id: string;
+    text: string;
+    done: boolean;
+    order: number;
+}
+
 export interface OrgNote {
     id: string;
-    title?: string;
-    body: string;
+    type: NoteType;
+    title: string;
+    body: string; // Plain text content
+    checklistItems?: ChecklistItem[]; // Only if type=checklist
     pinned: boolean;
-    isChecklist: boolean;
-    tags?: string[];
+    archived: boolean;
+    notebookId?: string;
+    tags: string[];
+    linkedTaskIds?: string[];
+    remindAt?: number; // Timestamp
+    
+    // Legacy fields for migration compat
+    isChecklist?: boolean; 
+    
+    createdAt: number;
+    updatedAt: number;
+}
+
+export interface OrgNotebook {
+    id: string;
+    name: string;
+    color?: string;
     createdAt: number;
     updatedAt: number;
 }

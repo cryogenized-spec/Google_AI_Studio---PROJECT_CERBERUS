@@ -29,8 +29,6 @@ export class GlobalErrorBoundary extends Component<Props, State> {
     }
 
     // CRITICAL FIX 2: Force Root Visibility
-    // The boot sequence keeps root at opacity 0 until ready.
-    // If we crash before that, we must force it visible to show the error.
     const root = document.getElementById('root');
     if (root) {
         root.classList.add('booted');
@@ -43,16 +41,25 @@ export class GlobalErrorBoundary extends Component<Props, State> {
   handleHardReset = async () => {
     if (confirm("WARNING: This will wipe all local data (chats, characters, settings, organizer) to fix the crash. This cannot be undone. Continue?")) {
         localStorage.clear();
+        sessionStorage.clear();
         try {
-            // Attempt to delete databases
-            const dbs = await window.indexedDB.databases();
-            dbs.forEach(db => {
-                if (db.name) window.indexedDB.deleteDatabase(db.name);
-            });
+            await Dexie.delete('OrganizerDB');
+            
+            // Native fallback attempt
+            if (window.indexedDB && window.indexedDB.databases) {
+                const dbs = await window.indexedDB.databases();
+                for (const db of dbs) {
+                    if (db.name) {
+                        const req = window.indexedDB.deleteDatabase(db.name);
+                        req.onsuccess = () => console.log(`Deleted ${db.name}`);
+                        req.onerror = () => console.error(`Failed to delete ${db.name}`);
+                    }
+                }
+            }
         } catch (e) {
             console.error("Failed to delete DB", e);
         }
-        window.location.reload();
+        setTimeout(() => window.location.reload(), 500);
     }
   };
 
@@ -96,7 +103,6 @@ export class GlobalErrorBoundary extends Component<Props, State> {
       );
     }
 
-    // Cast 'this' to any to avoid 'Property props does not exist on type...' error in some envs
     return (this as any).props.children;
   }
 }

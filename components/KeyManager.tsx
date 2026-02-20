@@ -1,453 +1,308 @@
 
 import React, { useState, useEffect } from 'react';
-import { db, requestPersistentStorage } from '../services/organizerDb';
-import { encryptApiKey, decryptApiKey } from '../services/encryptionService';
-import { testGeminiConnection } from '../services/geminiService';
-import { testGrokConnection } from '../services/grokService';
+import { Lock, Unlock, Key, Shield, AlertCircle, Save, X, Eye, EyeOff, Check, HardDrive } from 'lucide-react';
 import { AppSettings } from '../types';
-import { Shield, Lock, Unlock, Key, Check, AlertCircle, Save, Loader2, RefreshCw, Trash2, Zap, Eye, EyeOff } from 'lucide-react';
+import { encryptApiKey, decryptApiKey } from '../services/encryptionService';
+import { db } from '../services/organizerDb';
 
 interface KeyManagerProps {
     mode: 'onboarding' | 'unlock' | 'settings';
+    existingKeys?: Partial<AppSettings>;
     onKeysReady: (keys: Partial<AppSettings>) => void;
     onClose?: () => void;
-    existingKeys?: Partial<AppSettings>;
 }
 
-type Provider = 'gemini' | 'grok' | 'openai';
-type TestStatus = 'idle' | 'testing' | 'success' | 'error';
-
-const KeyManager: React.FC<KeyManagerProps> = ({ mode, onKeysReady, onClose, existingKeys }) => {
-    // View State
-    const [activeProvider, setActiveProvider] = useState<Provider>('gemini');
-    
-    // Data State (Persists across tabs)
-    const [draftKeys, setDraftKeys] = useState<Record<Provider, string>>({
-        gemini: '',
-        grok: '',
-        openai: ''
-    });
-    
-    const [testStatuses, setTestStatuses] = useState<Record<Provider, TestStatus>>({
-        gemini: 'idle',
-        grok: 'idle',
-        openai: 'idle'
+const KeyManager: React.FC<KeyManagerProps> = ({ mode, existingKeys, onKeysReady, onClose }) => {
+    // Key State
+    const [keys, setKeys] = useState({
+        apiKeyGemini: existingKeys?.apiKeyGemini || '',
+        apiKeyGrok: existingKeys?.apiKeyGrok || '',
+        apiKeyOpenAI: existingKeys?.apiKeyOpenAI || ''
     });
 
-    const [showKey, setShowKey] = useState(false);
-
-    // Storage Config
-    const [storageMode, setStorageMode] = useState<'session' | 'encrypted'>('session');
+    // UI State
+    const [storageMode, setStorageMode] = useState<'session' | 'encrypted' | 'plaintext'>('session');
     const [pin, setPin] = useState('');
     const [pinConfirm, setPinConfirm] = useState('');
-    const [unlockError, setUnlockError] = useState('');
-    const [isProcessing, setIsProcessing] = useState(false);
-    const [isSecure, setIsSecure] = useState(true);
+    const [unlockPin, setUnlockPin] = useState('');
+    const [status, setStatus] = useState<'idle' | 'processing' | 'success' | 'error'>('idle');
+    const [errorMsg, setErrorMsg] = useState('');
+    const [showKeys, setShowKeys] = useState(false);
 
-    // Load existing keys on mount
+    // Initial check for settings mode to pre-fill storage mode
     useEffect(() => {
-        setIsSecure(window.isSecureContext);
-        if (!window.isSecureContext) setStorageMode('session');
-
-        if (existingKeys) {
-            setDraftKeys({
-                gemini: existingKeys.apiKeyGemini || '',
-                grok: existingKeys.apiKeyGrok || '',
-                openai: existingKeys.apiKeyOpenAI || ''
-            });
-            
-            // Auto-validate existence visually
-            setTestStatuses({
-                gemini: existingKeys.apiKeyGemini ? 'success' : 'idle',
-                grok: existingKeys.apiKeyGrok ? 'success' : 'idle',
-                openai: existingKeys.apiKeyOpenAI ? 'success' : 'idle'
-            });
+        if (mode === 'settings') {
+            const checkDB = async () => {
+                const secrets = await db.secrets.toArray();
+                if (secrets.some(s => s.mode === 'encrypted')) {
+                    setStorageMode('encrypted');
+                } else if (secrets.some(s => s.mode === 'plaintext')) {
+                    setStorageMode('plaintext');
+                } else {
+                    setStorageMode('session');
+                }
+            };
+            checkDB();
         }
-    }, [existingKeys]);
+    }, [mode]);
 
-    const handleInputChange = (val: string) => {
-        setDraftKeys(prev => ({ ...prev, [activeProvider]: val }));
-        setTestStatuses(prev => ({ ...prev, [activeProvider]: 'idle' }));
-    };
-
-    const handleTestKey = async () => {
-        const key = draftKeys[activeProvider];
-        if (!key.trim()) return;
-
-        setTestStatuses(prev => ({ ...prev, [activeProvider]: 'testing' }));
-        
+    const handleUnlock = async () => {
+        setStatus('processing');
+        setErrorMsg('');
         try {
-            let success = false;
-            if (activeProvider === 'gemini') {
-                success = await testGeminiConnection(key);
-            } else if (activeProvider === 'grok') {
-                success = await testGrokConnection(key);
-            } else {
-                // OpenAI simple fetch test
-                try {
-                    const res = await fetch('https://api.openai.com/v1/models', {
-                        headers: { 'Authorization': `Bearer ${key}` }
-                    });
-                    success = res.ok;
-                } catch(e) { success = false; }
+            const secrets = await db.secrets.toArray();
+            
+            // If nothing in DB but we are in unlock mode, just proceed with empty (fallback)
+            if (secrets.length === 0) {
+                onKeysReady({});
+                return;
+            }
+
+            const decryptedKeys: Partial<AppSettings> = {};
+            
+            for (const secret of secrets) {
+                if (secret.mode === 'encrypted' && secret.enc) {
+                    try {
+                        const val = await decryptApiKey(secret.enc, unlockPin);
+                        if (secret.id === 'gemini') decryptedKeys.apiKeyGemini = val;
+                        if (secret.id === 'grok') decryptedKeys.apiKeyGrok = val;
+                        if (secret.id === 'openai') decryptedKeys.apiKeyOpenAI = val;
+                    } catch (e) {
+                        throw new Error("Invalid PIN");
+                    }
+                }
             }
             
-            setTestStatuses(prev => ({ ...prev, [activeProvider]: success ? 'success' : 'error' }));
-        } catch (e) {
-            setTestStatuses(prev => ({ ...prev, [activeProvider]: 'error' }));
+            setStatus('success');
+            setTimeout(() => onKeysReady(decryptedKeys), 500);
+        } catch (e: any) {
+            setStatus('error');
+            setErrorMsg(e.message || "Decryption failed");
         }
     };
 
     const handleSave = async () => {
-        // Validation: Must have at least one Main Key (Gemini or Grok)
-        const hasMainKey = draftKeys.gemini.trim() || draftKeys.grok.trim();
-        if (!hasMainKey) {
-            alert("You must provide at least one Main API Key (Gemini or Grok) to proceed.");
-            return;
-        }
-
         if (storageMode === 'encrypted') {
-            if (!isSecure) {
-                alert("Encryption is unavailable in this environment (HTTP). Please use Quick Session.");
-                return;
-            }
             if (pin.length < 4) {
-                alert("PIN must be at least 4 digits.");
+                setErrorMsg("PIN must be at least 4 digits.");
                 return;
             }
             if (pin !== pinConfirm) {
-                alert("PINs do not match.");
+                setErrorMsg("PINs do not match.");
                 return;
             }
         }
 
-        setIsProcessing(true);
-        try {
-            // 1. Storage Logic
-            if (storageMode === 'encrypted') {
-                await requestPersistentStorage();
-                
-                const providers: Provider[] = ['gemini', 'grok', 'openai'];
-                
-                for (const p of providers) {
-                    const key = draftKeys[p];
-                    if (key.trim()) {
-                        const encrypted = await encryptApiKey(key, pin);
-                        await db.secrets.put({
-                            id: p,
-                            provider: p,
-                            mode: 'encrypted',
-                            enc: encrypted,
-                            createdAt: Date.now(),
-                            updatedAt: Date.now()
-                        });
-                    } else {
-                        // Clean up empty keys
-                        await db.secrets.delete(p);
-                    }
-                }
-            } else {
-                // Session Mode: Clear persistent secrets
-                await db.secrets.clear();
-            }
-
-            // 2. Prepare Runtime Keys
-            const finalKeys: Partial<AppSettings> = {
-                apiKeyGemini: draftKeys.gemini,
-                apiKeyGrok: draftKeys.grok,
-                apiKeyOpenAI: draftKeys.openai,
-            };
-
-            // 3. Set Active Provider preference
-            // If the user entered Gemini but not Grok, default to Gemini, and vice-versa.
-            if (draftKeys.gemini && !draftKeys.grok) finalKeys.activeProvider = 'gemini';
-            else if (!draftKeys.gemini && draftKeys.grok) finalKeys.activeProvider = 'grok';
-            // If both present, preserve existing setting or default to Gemini if unset.
-            
-            onKeysReady(finalKeys);
-            if (onClose) onClose();
-
-        } catch (e: any) {
-            console.error("Save Failed", e);
-            alert(`Failed to secure keys: ${e.message}`);
-        } finally {
-            setIsProcessing(false);
-        }
-    };
-
-    const handleUnlock = async () => {
-        if (!pin.trim()) return;
-        setIsProcessing(true);
-        setUnlockError('');
+        setStatus('processing');
+        setErrorMsg('');
         
         try {
-            const secrets = await db.secrets.toArray();
-            const decryptedKeys: Partial<AppSettings> = {};
-            let successCount = 0;
-
-            for (const secret of secrets) {
-                if (secret.mode === 'encrypted' && secret.enc) {
-                    try {
-                        const rawKey = await decryptApiKey(secret.enc, pin);
-                        if (rawKey) {
-                            if (secret.id === 'gemini') decryptedKeys.apiKeyGemini = rawKey;
-                            if (secret.id === 'grok') decryptedKeys.apiKeyGrok = rawKey;
-                            if (secret.id === 'openai') decryptedKeys.apiKeyOpenAI = rawKey;
-                            successCount++;
-                        }
-                    } catch (e) {
-                        // Wrong PIN usually throws here
-                        console.warn(`Decrypt failed for ${secret.id}`);
-                    }
-                }
-            }
-
-            // If we decrypted ANYTHING, we let them in.
-            // This handles cases where one key might be corrupt but another is fine.
-            if (successCount > 0) {
-                onKeysReady(decryptedKeys);
-                if (onClose) onClose();
-            } else {
-                setUnlockError("Incorrect PIN or no keys found.");
-            }
-        } catch (e: any) {
-            console.error("Unlock critical failure", e);
-            setUnlockError("Storage Access Error: " + e.message);
-        } finally {
-            setIsProcessing(false);
-        }
-    };
-
-    const handleClearKeys = async () => {
-        if (confirm("Reset Secure Storage? This deletes all saved keys from this device.")) {
+            // Clear existing secrets to prevent duplicates/conflicts
             await db.secrets.clear();
-            window.location.reload();
+
+            const saveSecret = async (id: string, val: string) => {
+                if (!val) return;
+                
+                if (storageMode === 'encrypted') {
+                    const enc = await encryptApiKey(val, pin);
+                    await db.secrets.put({
+                        id,
+                        provider: 'google', 
+                        mode: 'encrypted',
+                        enc,
+                        createdAt: Date.now(),
+                        updatedAt: Date.now()
+                    });
+                } else if (storageMode === 'plaintext') {
+                    await db.secrets.put({
+                        id,
+                        provider: 'google',
+                        mode: 'plaintext',
+                        value: val,
+                        createdAt: Date.now(),
+                        updatedAt: Date.now()
+                    });
+                }
+            };
+
+            if (keys.apiKeyGemini) await saveSecret('gemini', keys.apiKeyGemini);
+            if (keys.apiKeyGrok) await saveSecret('grok', keys.apiKeyGrok);
+            if (keys.apiKeyOpenAI) await saveSecret('openai', keys.apiKeyOpenAI);
+
+            // If session, we just cleared DB which is correct behavior (no persistence)
+
+            setStatus('success');
+            setTimeout(() => onKeysReady(keys), 500);
+        } catch (e: any) {
+            setStatus('error');
+            setErrorMsg("Failed to save keys: " + e.message);
         }
     };
 
-    const getPlaceholder = (p: Provider) => {
-        if (p === 'gemini') return 'AIzaSy...';
-        if (p === 'grok') return 'xai-...';
-        return 'sk-...';
-    };
-
-    // --- RENDER: UNLOCK MODE ---
+    // Render Unlock Screen
     if (mode === 'unlock') {
         return (
-            <div className="fixed inset-0 z-[200] bg-cerberus-900 flex items-center justify-center p-4">
-                <div className="w-full max-w-md bg-black/50 border border-cerberus-800 rounded-lg p-8 text-center animate-fadeIn shadow-2xl">
+            <div className="fixed inset-0 z-[200] bg-black/90 backdrop-blur-xl flex items-center justify-center p-4">
+                <div className="bg-cerberus-900 border border-cerberus-700 w-full max-w-sm rounded-lg p-8 text-center shadow-[0_0_50px_rgba(212,175,55,0.1)] animate-fadeIn">
                     <Lock size={48} className="mx-auto text-cerberus-accent mb-4" />
-                    <h2 className="text-xl font-serif text-white mb-2 tracking-widest">SECURE STORAGE LOCKED</h2>
-                    <p className="text-gray-500 text-xs font-mono mb-6">Enter your PIN to decrypt API keys.</p>
+                    <h2 className="text-xl font-serif text-white tracking-widest mb-2">SECURITY CHECK</h2>
+                    <p className="text-xs text-gray-500 mb-6">Enter PIN to decrypt your credentials.</p>
                     
                     <input 
-                        type="password" 
-                        value={pin}
-                        onChange={e => setPin(e.target.value)}
-                        onKeyDown={e => e.key === 'Enter' && handleUnlock()}
-                        className="bg-cerberus-900 border border-cerberus-700 rounded p-3 text-center text-white text-lg tracking-[0.5em] w-full mb-4 focus:border-cerberus-accent outline-none font-mono placeholder-gray-700"
-                        placeholder="••••"
+                        type="password"
                         autoFocus
+                        value={unlockPin}
+                        onChange={e => setUnlockPin(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && handleUnlock()}
+                        className="bg-black border border-cerberus-800 text-center text-white text-2xl tracking-[0.5em] p-3 rounded w-full mb-4 focus:border-cerberus-accent focus:outline-none font-mono"
+                        placeholder="••••"
                     />
                     
-                    {unlockError && <div className="text-red-500 text-xs mb-4 flex items-center justify-center gap-2"><AlertCircle size={12}/> {unlockError}</div>}
-
+                    {errorMsg && <p className="text-red-500 text-xs mb-4 flex items-center justify-center gap-1"><AlertCircle size={12}/> {errorMsg}</p>}
+                    
                     <button 
                         onClick={handleUnlock}
-                        disabled={isProcessing}
-                        className="w-full py-3 bg-cerberus-600 hover:bg-cerberus-500 text-white font-bold uppercase tracking-widest rounded transition-colors flex items-center justify-center gap-2 mb-4"
+                        disabled={status === 'processing'}
+                        className="w-full py-3 bg-cerberus-accent text-black font-bold uppercase tracking-widest text-xs rounded hover:bg-white transition-colors disabled:opacity-50"
                     >
-                        {isProcessing ? <Loader2 size={16} className="animate-spin"/> : <Unlock size={16}/>}
-                        Decrypt & Enter
-                    </button>
-                    
-                    <button onClick={handleClearKeys} className="text-xs text-gray-600 hover:text-red-500 underline flex items-center justify-center gap-1 w-full">
-                        <Trash2 size={12}/> Forgot PIN? Reset Storage
+                        {status === 'processing' ? 'Decrypting...' : 'Unlock'}
                     </button>
                 </div>
             </div>
         );
     }
 
-    // --- RENDER: SETUP/SETTINGS MODE ---
-    const testStatus = testStatuses[activeProvider];
-    const currentKey = draftKeys[activeProvider];
-
+    // Render Setup/Settings Screen
     return (
-        <div className={`
-            ${mode === 'settings' ? 'relative' : 'fixed inset-0 z-[200] bg-cerberus-900 flex items-center justify-center p-4'}
-        `}>
-            <div className={`w-full ${mode === 'settings' ? '' : 'max-w-md bg-black/50 border border-cerberus-800 rounded-lg p-6 shadow-2xl animate-fadeIn'}`}>
-                {mode !== 'settings' && (
-                    <div className="text-center mb-6">
-                        <Shield size={40} className="mx-auto text-cerberus-accent mb-2" />
-                        <h2 className="text-lg font-serif text-white tracking-widest">SYSTEM CREDENTIALS</h2>
-                        <p className="text-[10px] text-gray-500 uppercase tracking-wider">Configure your connection to the Void</p>
-                    </div>
-                )}
+        <div className={`fixed inset-0 z-[150] bg-black/90 backdrop-blur-sm flex items-center justify-center p-4 ${mode === 'settings' ? '' : 'animate-fadeIn'}`}>
+            <div className="bg-cerberus-900 border border-cerberus-700 w-full max-w-lg rounded-lg shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+                <div className="p-4 border-b border-cerberus-800 flex justify-between items-center bg-cerberus-950">
+                    <h2 className="text-lg font-serif text-cerberus-accent tracking-widest flex items-center gap-2">
+                        <Key size={18} /> API CREDENTIALS
+                    </h2>
+                    {onClose && <button onClick={onClose}><X size={20} className="text-gray-500 hover:text-white" /></button>}
+                </div>
 
-                <div className="space-y-5">
-                    {/* Provider Select Tabs */}
-                    <div>
-                        <label className="block text-[10px] uppercase text-gray-500 font-bold mb-2">Select Provider</label>
-                        <div className="flex bg-cerberus-900/50 p-1 rounded border border-cerberus-800">
-                            {(['gemini', 'grok', 'openai'] as const).map(p => {
-                                const status = testStatuses[p];
-                                // Logic for dot: Red if error, Green if success, Gray if idle but has content
-                                let dotColor = 'bg-transparent';
-                                if (status === 'success') dotColor = 'bg-green-500 shadow-[0_0_5px_#22c55e]';
-                                else if (status === 'error') dotColor = 'bg-red-500 shadow-[0_0_5px_#ef4444]';
-                                else if (draftKeys[p]) dotColor = 'bg-gray-500';
-
-                                return (
-                                    <button
-                                        key={p}
-                                        onClick={() => setActiveProvider(p)}
-                                        className={`flex-1 py-2 text-[10px] uppercase font-bold rounded transition-all duration-200 flex items-center justify-center gap-1 ${
-                                            activeProvider === p 
-                                                ? 'bg-cerberus-800 text-white shadow shadow-black/50 border border-cerberus-700' 
-                                                : 'text-gray-500 hover:text-gray-300'
-                                        }`}
-                                    >
-                                        {p === 'openai' ? 'OpenAI' : p === 'grok' ? 'xAI Grok' : 'Gemini'}
-                                        {/* Status Dot */}
-                                        <span className={`w-1.5 h-1.5 rounded-full ml-1 ${dotColor}`} />
-                                    </button>
-                                );
-                            })}
-                        </div>
-                    </div>
-
-                    {/* API Key Input Field */}
-                    <div className="relative">
-                        <label className="flex justify-between text-[10px] uppercase text-gray-500 font-bold mb-1">
-                            <span>{activeProvider} API Key</span>
-                            {activeProvider === 'openai' && <span className="text-gray-600">(Optional - Voice/Image)</span>}
-                        </label>
-                        <div className="relative group">
-                            <input 
-                                type={showKey ? "text" : "password"}
-                                value={currentKey}
-                                onChange={e => handleInputChange(e.target.value)}
-                                className={`
-                                    w-full bg-cerberus-900 border rounded p-3 text-sm text-white font-mono pr-24 outline-none transition-all duration-300
-                                    ${testStatus === 'success' 
-                                        ? 'border-green-800 shadow-[0_0_10px_rgba(34,197,94,0.1)] focus:border-green-600' 
-                                        : testStatus === 'error' 
-                                            ? 'border-red-800 focus:border-red-600' 
-                                            : 'border-cerberus-700 focus:border-cerberus-accent'
-                                    }
-                                `}
-                                placeholder={getPlaceholder(activeProvider)}
-                            />
-                            
-                            {/* Toggle Visibility */}
-                            <button 
-                                onClick={() => setShowKey(!showKey)}
-                                className="absolute right-24 top-3 text-gray-500 hover:text-gray-300"
-                            >
-                                {showKey ? <EyeOff size={14}/> : <Eye size={14}/>}
-                            </button>
-
-                            {/* Test Button - BLUE DEFAULT */}
-                            <button 
-                                onClick={handleTestKey}
-                                disabled={!currentKey || testStatus === 'testing'}
-                                className={`
-                                    absolute right-1 top-1 bottom-1 px-3 rounded text-[10px] uppercase font-bold flex items-center gap-2 transition-all duration-300
-                                    ${testStatus === 'success' 
-                                        ? 'bg-green-700 text-white shadow-[0_0_10px_rgba(34,197,94,0.4)]' 
-                                        : testStatus === 'error'
-                                            ? 'bg-red-700 text-white'
-                                            : 'bg-blue-600 hover:bg-blue-500 text-white' // BLUE DEFAULT
-                                    }
-                                    ${(!currentKey || testStatus === 'testing') && 'opacity-70 cursor-not-allowed'}
-                                `}
-                            >
-                                {testStatus === 'testing' ? <Loader2 size={12} className="animate-spin"/> : 
-                                 testStatus === 'success' ? <Check size={12}/> : 
-                                 testStatus === 'error' ? <AlertCircle size={12}/> :
-                                 <RefreshCw size={12}/>}
-                                
-                                {testStatus === 'success' ? 'Locked' : testStatus === 'error' ? 'Retry' : 'Test'}
-                            </button>
-                        </div>
-                        {testStatus === 'success' && <p className="text-[9px] text-green-500 mt-1 flex items-center gap-1"><Check size={10}/> Key verified & locked in.</p>}
-                    </div>
-
-                    <div className="h-px bg-cerberus-800 w-full" />
-
-                    {/* Storage Mode */}
-                    <div>
-                        <label className="block text-[10px] uppercase text-gray-500 font-bold mb-2">Storage Persistence</label>
-                        <div className="grid grid-cols-2 gap-3">
-                            <button 
-                                onClick={() => setStorageMode('session')}
-                                className={`p-3 border rounded text-left transition-all ${storageMode === 'session' ? 'bg-cerberus-800 border-cerberus-accent shadow-[0_0_10px_rgba(212,175,55,0.1)]' : 'bg-transparent border-cerberus-800 opacity-60 hover:opacity-100'}`}
-                            >
-                                <div className="text-xs font-bold text-white mb-1 flex items-center gap-2"><Zap size={12}/> Quick Session</div>
-                                <div className="text-[9px] text-gray-400 leading-tight">Key cleared on reload. Safe for shared devices.</div>
-                            </button>
-                            <button 
-                                onClick={() => {
-                                    if (isSecure) setStorageMode('encrypted');
-                                    else alert("Secure Storage requires HTTPS or Localhost.");
-                                }}
-                                className={`p-3 border rounded text-left transition-all ${storageMode === 'encrypted' ? 'bg-cerberus-800 border-cerberus-accent shadow-[0_0_10px_rgba(212,175,55,0.1)]' : 'bg-transparent border-cerberus-800 opacity-60 hover:opacity-100'} ${!isSecure && 'opacity-30 cursor-not-allowed grayscale'}`}
-                            >
-                                <div className="text-xs font-bold text-white mb-1 flex items-center gap-2"><Lock size={12}/> Secure Storage</div>
-                                <div className="text-[9px] text-gray-400 leading-tight">Encrypted with PIN. Persists locally.</div>
-                            </button>
-                        </div>
-                    </div>
-
-                    {/* PIN Entry (Only if Encrypted) */}
-                    {storageMode === 'encrypted' && (
-                        <div className="animate-fadeIn bg-cerberus-900/50 p-4 rounded border border-cerberus-800">
-                            <label className="block text-[10px] uppercase text-cerberus-accent font-bold mb-2">Set Security PIN</label>
-                            <div className="flex gap-2">
-                                <input 
-                                    type="password" 
-                                    value={pin}
-                                    onChange={e => setPin(e.target.value)}
-                                    className="flex-1 bg-black border border-cerberus-700 rounded p-2 text-center text-white font-mono tracking-widest text-sm focus:border-cerberus-accent outline-none"
-                                    placeholder="PIN"
-                                    maxLength={8}
-                                />
-                                <input 
-                                    type="password" 
-                                    value={pinConfirm}
-                                    onChange={e => setPinConfirm(e.target.value)}
-                                    className="flex-1 bg-black border border-cerberus-700 rounded p-2 text-center text-white font-mono tracking-widest text-sm focus:border-cerberus-accent outline-none"
-                                    placeholder="Confirm"
-                                    maxLength={8}
-                                />
-                            </div>
-                            <p className="text-[9px] text-gray-500 mt-2">PIN is required to decrypt keys on next visit. If lost, data is unrecoverable.</p>
+                <div className="p-6 overflow-y-auto custom-scrollbar space-y-6">
+                    {/* Intro Text */}
+                    {mode === 'onboarding' && (
+                        <div className="bg-cerberus-800/20 border border-cerberus-800 p-4 rounded text-center">
+                            <p className="text-sm text-gray-300 font-serif leading-relaxed">
+                                "I require a spark to awaken. Provide your API keys to instantiate the connection."
+                            </p>
                         </div>
                     )}
 
-                    {/* Footer Actions */}
-                    <div className="pt-2 flex gap-2">
-                        {onClose && (
-                            <button onClick={onClose} className="flex-1 py-3 border border-cerberus-700 text-gray-400 rounded uppercase text-xs font-bold hover:text-white hover:border-gray-500 transition-colors">
-                                Cancel
-                            </button>
-                        )}
-                        <button 
-                            onClick={handleSave}
-                            disabled={isProcessing || (!draftKeys.gemini && !draftKeys.grok)}
-                            className={`flex-[2] py-3 text-white rounded uppercase text-xs font-bold flex items-center justify-center gap-2 shadow-lg transition-all
-                                ${isProcessing || (!draftKeys.gemini && !draftKeys.grok) 
-                                    ? 'bg-gray-800 text-gray-500 cursor-not-allowed' 
-                                    : 'bg-cerberus-600 hover:bg-cerberus-500 hover:shadow-[0_0_15px_rgba(155,44,44,0.4)]'
-                                }
-                            `}
-                        >
-                            {isProcessing ? <Loader2 size={16} className="animate-spin"/> : <Save size={16}/>}
-                            {mode === 'onboarding' ? 'Initialize System' : 'Save Configuration'}
+                    {/* Inputs */}
+                    <div className="space-y-4">
+                        <div className="relative">
+                            <label className="block text-[10px] font-mono text-cerberus-accent uppercase mb-1">Google Gemini API Key (Required)</label>
+                            <input 
+                                type={showKeys ? "text" : "password"} 
+                                value={keys.apiKeyGemini}
+                                onChange={e => setKeys({...keys, apiKeyGemini: e.target.value})}
+                                className="w-full bg-black border border-cerberus-800 rounded p-3 text-sm text-white focus:border-cerberus-accent focus:outline-none font-mono"
+                                placeholder="AIzaSy..."
+                            />
+                        </div>
+                        <div className="relative">
+                            <label className="block text-[10px] font-mono text-gray-500 uppercase mb-1">xAI Grok API Key (Optional)</label>
+                            <input 
+                                type={showKeys ? "text" : "password"} 
+                                value={keys.apiKeyGrok}
+                                onChange={e => setKeys({...keys, apiKeyGrok: e.target.value})}
+                                className="w-full bg-black border border-cerberus-800 rounded p-3 text-sm text-white focus:border-cerberus-accent focus:outline-none font-mono"
+                                placeholder="xai-..."
+                            />
+                        </div>
+                        <div className="relative">
+                            <label className="block text-[10px] font-mono text-gray-500 uppercase mb-1">OpenAI API Key (Optional / Voice)</label>
+                            <input 
+                                type={showKeys ? "text" : "password"} 
+                                value={keys.apiKeyOpenAI}
+                                onChange={e => setKeys({...keys, apiKeyOpenAI: e.target.value})}
+                                className="w-full bg-black border border-cerberus-800 rounded p-3 text-sm text-white focus:border-cerberus-accent focus:outline-none font-mono"
+                                placeholder="sk-..."
+                            />
+                        </div>
+                        <button onClick={() => setShowKeys(!showKeys)} className="text-xs text-gray-500 flex items-center gap-1 hover:text-white">
+                            {showKeys ? <EyeOff size={12}/> : <Eye size={12}/>} {showKeys ? 'Hide Keys' : 'Show Keys'}
                         </button>
                     </div>
+
+                    {/* Storage Mode */}
+                    <div className="border-t border-cerberus-800 pt-6">
+                        <label className="block text-[10px] font-mono text-cerberus-accent uppercase mb-3 text-center">Storage Method</label>
+                        <div className="flex bg-black p-1 rounded-lg border border-cerberus-800 mb-4 gap-1">
+                            <button 
+                                onClick={() => setStorageMode('session')}
+                                className={`flex-1 py-3 rounded text-xs font-bold uppercase tracking-wider flex flex-col items-center gap-1 transition-all ${storageMode === 'session' ? 'bg-cerberus-800 text-white' : 'text-gray-500 hover:text-gray-300'}`}
+                            >
+                                <Unlock size={16} /> Session
+                                <span className="text-[8px] opacity-60 normal-case font-sans">Wiped on reload</span>
+                            </button>
+                            <button 
+                                onClick={() => setStorageMode('encrypted')}
+                                className={`flex-1 py-3 rounded text-xs font-bold uppercase tracking-wider flex flex-col items-center gap-1 transition-all ${storageMode === 'encrypted' ? 'bg-cerberus-800 text-white' : 'text-gray-500 hover:text-gray-300'}`}
+                            >
+                                <Shield size={16} /> Encrypted
+                                <span className="text-[8px] opacity-60 normal-case font-sans">Secure, PIN required</span>
+                            </button>
+                            <button 
+                                onClick={() => setStorageMode('plaintext')}
+                                className={`flex-1 py-3 rounded text-xs font-bold uppercase tracking-wider flex flex-col items-center gap-1 transition-all ${storageMode === 'plaintext' ? 'bg-cerberus-800 text-white' : 'text-gray-500 hover:text-gray-300'}`}
+                            >
+                                <HardDrive size={16} /> Local
+                                <span className="text-[8px] opacity-60 normal-case font-sans">Unsecure, Auto-load</span>
+                            </button>
+                        </div>
+
+                        {/* PIN Entry (Only if Encrypted) */}
+                        {storageMode === 'encrypted' && (
+                            <div className="animate-fadeIn bg-cerberus-900/50 p-4 rounded border border-cerberus-800 text-center">
+                                <label className="block text-[10px] uppercase text-cerberus-accent font-bold mb-3 tracking-widest">Set Security PIN</label>
+                                <div className="flex gap-3">
+                                    <input 
+                                        type="password" 
+                                        value={pin}
+                                        onChange={e => setPin(e.target.value)}
+                                        className="flex-1 bg-black border border-cerberus-700 rounded p-3 text-center text-white font-mono tracking-widest text-sm focus:border-cerberus-accent outline-none placeholder-gray-600 transition-all"
+                                        placeholder="PIN"
+                                        maxLength={8}
+                                    />
+                                    <input 
+                                        type="password" 
+                                        value={pinConfirm}
+                                        onChange={e => setPinConfirm(e.target.value)}
+                                        className="flex-1 bg-black border border-cerberus-700 rounded p-3 text-center text-white font-mono tracking-widest text-sm focus:border-cerberus-accent outline-none placeholder-gray-600 transition-all"
+                                        placeholder="CONFIRM"
+                                        maxLength={8}
+                                    />
+                                </div>
+                                <p className="text-[9px] text-gray-500 mt-3 mx-auto max-w-xs leading-relaxed">PIN is required to decrypt keys on next visit. If lost, data is unrecoverable.</p>
+                            </div>
+                        )}
+                        
+                        {storageMode === 'plaintext' && (
+                            <div className="animate-fadeIn bg-red-950/20 p-3 rounded border border-red-900/50 text-center">
+                                <p className="text-[10px] text-red-400 leading-relaxed font-bold flex items-center justify-center gap-2">
+                                    <AlertCircle size={12}/> Warning: Keys stored in plaintext
+                                </p>
+                                <p className="text-[9px] text-gray-500 mt-1">Anyone with access to this device can retrieve your API keys.</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                <div className="p-4 border-t border-cerberus-800 bg-cerberus-950 flex flex-col gap-2">
+                    {errorMsg && <div className="text-red-500 text-xs text-center flex items-center justify-center gap-2 bg-red-900/20 p-2 rounded"><AlertCircle size={14}/> {errorMsg}</div>}
+                    <button 
+                        onClick={handleSave}
+                        disabled={status === 'processing'}
+                        className={`w-full py-4 rounded font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-2 transition-all ${status === 'success' ? 'bg-green-800 text-white' : 'bg-cerberus-accent text-black hover:bg-white'}`}
+                    >
+                        {status === 'processing' ? 'Processing...' : status === 'success' ? <><Check size={16}/> Saved</> : <><Save size={16}/> Save & Continue</>}
+                    </button>
                 </div>
             </div>
         </div>

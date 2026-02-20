@@ -1,28 +1,30 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { ChatState, Message, Thread, AgentMode, Room, CharacterProfile, AppSettings, Outfit, ScheduledEvents, ScriptoriumConfig, DungeonConfig } from './types';
-import { DEFAULT_SETTINGS, DEFAULT_PROFILE, DEFAULT_ROOMS, DEFAULT_MOOD_STATE, DEFAULT_DEEP_LOGIC, DEFAULT_OUTFITS, STATIC_THREAD_ID, DEFAULT_SCHEDULE, SCRIPTORIUM_THREAD_ID, DUNGEON_THREAD_ID, DEFAULT_SCRIPTORIUM_CONFIG, DEFAULT_DUNGEON_CONFIG, DM_SYSTEM_PROMPT, YSARAITH_PLAYER_PROMPT_ADDENDUM, DEFAULT_MAPPING_LOGIC, OOC_SYSTEM_PROMPT, OOC_ADVISORY_SYSTEM_PROMPT, DEFAULT_TEMPLATES } from './constants';
+import { v4 as uuidv4 } from 'uuid';
+import { Message, Room, CharacterProfile, AppSettings, Thread, ChatState, MoodState, DeepLogicConfig, AgentMode, ScriptoriumConfig, DungeonConfig, Outfit, ScheduleSettings, RuntimeSettings, MemoryPolicy, ToolSettings, WakeLog, QuickPreset } from './types';
+import { DEFAULT_PROFILE, DEFAULT_ROOMS, DEFAULT_SETTINGS, DEFAULT_MOOD_STATE, DEFAULT_DEEP_LOGIC, DEFAULT_OUTFITS, DEFAULT_SCHEDULE_SETTINGS, DEFAULT_SCRIPTORIUM_CONFIG, DEFAULT_DUNGEON_CONFIG, OOC_ADVISORY_SYSTEM_PROMPT, OOC_SYSTEM_PROMPT, YSARAITH_PLAYER_PROMPT_ADDENDUM, STATIC_THREAD_ID, SCRIPTORIUM_THREAD_ID, DUNGEON_THREAD_ID, EVENT_DELTAS, STORAGE_KEY, UI_STATE_KEY } from './constants';
+import { compileCharacterSystemPrompt } from './services/promptCompiler';
+import { streamGeminiResponse } from './services/geminiService';
+import { streamGrokResponse } from './services/grokService';
+import { runWakeCycleLogic } from './services/wakeService';
+import { fetchSettings, saveSettings } from './services/firebaseService';
+import { decayStats, applyEvent, executePassiveLoop, logToSheet } from './services/agentService';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import SettingsModal from './components/SettingsModal';
-import WardrobeDrawer from './components/WardrobeDrawer';
+import KeyManager from './components/KeyManager';
 import ScriptoriumOverlay from './components/ScriptoriumOverlay';
 import DungeonOverlay from './components/DungeonOverlay';
-import TowerOfMirrors from './components/TowerOfMirrors'; 
+import TowerOfMirrors from './components/TowerOfMirrors';
+import WardrobeDrawer from './components/WardrobeDrawer';
 import CharacterGallery from './components/CharacterGallery';
+import CharacterSheetModal from './components/CharacterSheetModal';
+import CharacterEditorModal from './components/CharacterEditorModal';
 import QuickPanel from './components/QuickPanel';
-import KeyManager from './components/KeyManager';
-import { streamGeminiResponse } from './services/geminiService';
-import { streamGrokResponse } from './services/grokService';
-import { applyEvent, decayStats, executePassiveLoop, logToSheet } from './services/agentService';
-import { runWakeCycleLogic } from './services/wakeService';
-import { v4 as uuidv4 } from 'uuid';
-import { fetchSettings } from './services/firebaseService';
+import { TEMPLATES } from './data/templates';
 import { db } from './services/organizerDb';
 
-const STORAGE_KEY = 'project_cerberus_state_v5'; 
-
-// Helper hook for interval
+// Utility Hook for Intervals
 function useInterval(callback: () => void, delay: number | null) {
   const savedCallback = useRef(callback);
   useEffect(() => { savedCallback.current = callback; }, [callback]);
@@ -37,9 +39,12 @@ function useInterval(callback: () => void, delay: number | null) {
 const App: React.FC = () => {
   // --- ROUTING LOGIC ---
   const [isQuickMode, setIsQuickMode] = useState(window.location.pathname === '/quick');
+  
+  // Exit Intent State
+  const [exitIntent, setExitIntent] = useState(false);
+  const [showExitToast, setShowExitToast] = useState(false);
 
   useEffect(() => {
-      // Handle back button behavior for SPA
       const handlePopState = () => {
           setIsQuickMode(window.location.pathname === '/quick');
       };
@@ -47,39 +52,34 @@ const App: React.FC = () => {
       return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  // --- Boot Sequence Handoff ---
+  // --- BOOT SEQUENCE HANDOFF (CRITICAL FIX) ---
   useEffect(() => {
-    // CRITICAL: Signal to index.html that React is mounted and ready to show
+    // This tells index.html that React has mounted successfully
     if ((window as any).signalAppReady) {
-        // Small delay to ensure render paint
         setTimeout(() => { (window as any).signalAppReady(); }, 100);
     }
   }, []);
 
-  // --- EARLY EXIT FOR QUICK PANEL ---
   if (isQuickMode) {
       return <QuickPanel />;
   }
 
-  // --- State Initialization ---
+  // --- STATE INITIALIZATION WITH PERSISTENCE ---
   const [state, setState] = useState<ChatState>(() => {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
         
-        // --- MIGRATION LOGIC V5 -> V6 (Multi-Character) ---
-        
         // 1. Ensure Character List & Sanitize
         let characters: CharacterProfile[] = parsed.characters || [];
         let activeCharacterId = parsed.activeCharacterId;
 
-        // If no characters exist but we have a legacy profile, create the first user char from it
         if (characters.length === 0) {
             if (parsed.character) {
                 const legacyChar: CharacterProfile = {
-                    ...DEFAULT_PROFILE, // Start with defaults
-                    ...parsed.character, // Overwrite with saved data
+                    ...DEFAULT_PROFILE,
+                    ...parsed.character,
                     id: 'legacy_ysaraith_v1',
                     versionNumber: 1,
                     isTemplate: false,
@@ -88,23 +88,24 @@ const App: React.FC = () => {
                 characters.push(legacyChar);
                 activeCharacterId = legacyChar.id;
             } else {
-                // FALLBACK: If absolutely nothing exists, use Default
                 characters.push(DEFAULT_PROFILE);
                 activeCharacterId = DEFAULT_PROFILE.id;
             }
         }
 
-        // 1b. DEEP SANITIZATION: Ensure every character has a theme object (Legacy Fix)
-        // Also ensure sheet exists
+        // Deep sanitize characters
         characters = characters.map(c => ({
             ...c,
             theme: { ...DEFAULT_PROFILE.theme, ...(c.theme || {}) },
-            sheet: { ...DEFAULT_PROFILE.sheet, ...(c.sheet || {}) },
+            constraints: c.constraints || DEFAULT_PROFILE.constraints,
+            capabilities: c.capabilities || DEFAULT_PROFILE.capabilities,
+            roles: c.roles || { taskAgent: false, narrativeTrustMode: false },
+            progression: c.progression || DEFAULT_PROFILE.progression,
             portraitUrl: c.portraitUrl || DEFAULT_PROFILE.portraitUrl,
             name: c.name || 'Unknown Entity'
         }));
 
-        // 2. Ensure Threads have characterId
+        // Restore Threads
         const migratedThreads = (parsed.threads || []).map((t: any) => ({
             ...t,
             characterId: t.characterId || activeCharacterId,
@@ -117,7 +118,7 @@ const App: React.FC = () => {
             oocMessages: t.oocMessages || [] 
         }));
 
-        // Ensure critical threads exist
+        // Ensure system threads exist
         const ensureThread = (id: string, type: any, title: string) => {
             if (!migratedThreads.find((t: Thread) => t.id === id)) {
                 migratedThreads.push({ id, characterId: activeCharacterId, type, title, messages: [], oocMessages: [], lastUpdated: Date.now() });
@@ -131,10 +132,8 @@ const App: React.FC = () => {
         const cleanRooms = currentRooms.filter((r: Room) => r.id !== 'scriptorium');
         DEFAULT_ROOMS.forEach(defRoom => { if (defRoom.id !== 'scriptorium' && !cleanRooms.find((r: Room) => r.id === defRoom.id)) cleanRooms.push(defRoom); });
 
-        // Resolve active character safely
         const activeCharProfile = characters.find(c => c.id === activeCharacterId) || characters[0];
 
-        // Sanitize Configs (Deep Merge to ensure tools/fonts exist)
         const sanitizedScriptorium = { 
             ...DEFAULT_SCRIPTORIUM_CONFIG, 
             ...(parsed.scriptoriumConfig || {}),
@@ -151,7 +150,7 @@ const App: React.FC = () => {
            threads: migratedThreads,
            characters,
            activeCharacterId: activeCharProfile.id,
-           character: activeCharProfile, // Synced legacy prop
+           character: activeCharProfile,
            rooms: cleanRooms,
            settings: { ...DEFAULT_SETTINGS, ...parsed.settings },
            moodState: parsed.moodState || DEFAULT_MOOD_STATE,
@@ -160,25 +159,22 @@ const App: React.FC = () => {
            lastInteractionTimestamp: parsed.lastInteractionTimestamp || Date.now(),
            outfits: parsed.outfits || DEFAULT_OUTFITS,
            currentOutfitId: parsed.currentOutfitId || DEFAULT_OUTFITS[0].id,
-           scheduledEvents: parsed.scheduledEvents || DEFAULT_SCHEDULE,
-           isScriptoriumOpen: parsed.isScriptoriumOpen || false,
+           scheduledEvents: parsed.scheduledEvents || DEFAULT_SCHEDULE_SETTINGS,
+           isScriptoriumOpen: false,
            scriptoriumConfig: sanitizedScriptorium,
-           isDungeonOpen: parsed.isDungeonOpen || false,
+           isDungeonOpen: false,
            dungeonConfig: sanitizedDungeon,
            hasUnreadOOC: parsed.hasUnreadOOC || false,
-           isTowerOpen: parsed.isTowerOpen || false 
+           isTowerOpen: false,
+           traceLogs: parsed.traceLogs || []
         };
       } catch (e) {
-        console.error("Failed to parse saved state", e);
-        // Fallback to fresh install if parsing fails completely
         return getFreshInstallState();
       }
     }
-    
     return getFreshInstallState();
   });
 
-  // Extracted Fresh Install Logic
   function getFreshInstallState(): ChatState {
     const initialCharId = 'legacy_ysaraith_v1';
     const staticThread: Thread = { id: STATIC_THREAD_ID, characterId: initialCharId, type: 'static', title: 'Static Connection', messages: [], oocMessages: [], lastUpdated: Date.now() };
@@ -201,33 +197,105 @@ const App: React.FC = () => {
       deepLogic: DEFAULT_DEEP_LOGIC,
       outfits: DEFAULT_OUTFITS,
       currentOutfitId: DEFAULT_OUTFITS[0].id,
-      scheduledEvents: DEFAULT_SCHEDULE,
+      scheduledEvents: DEFAULT_SCHEDULE_SETTINGS,
       isScriptoriumOpen: false,
       scriptoriumConfig: DEFAULT_SCRIPTORIUM_CONFIG,
       isDungeonOpen: false,
       dungeonConfig: DEFAULT_DUNGEON_CONFIG,
       hasUnreadOOC: false,
-      isTowerOpen: false
+      isTowerOpen: false,
+      traceLogs: []
     };
   }
 
-  const [isSidebarOpen, setSidebarOpen] = useState(false);
-  const [settingsModalState, setSettingsModalState] = useState<{isOpen: boolean, initialTab?: 'api' | 'deeplogic'}>({isOpen: false});
-  const [isWardrobeOpen, setWardrobeOpen] = useState(false);
-  const [isGalleryOpen, setIsGalleryOpen] = useState(false); 
+  // --- UI STATE ---
+  const getPersistedUI = () => {
+      try {
+          const stored = localStorage.getItem(UI_STATE_KEY);
+          return stored ? JSON.parse(stored) : {};
+      } catch (e) { return {}; }
+  };
+  const uiState = getPersistedUI();
+
+  const [isSidebarOpen, setSidebarOpen] = useState(uiState.isSidebarOpen || false);
+  const [settingsModalState, setSettingsModalState] = useState<{isOpen: boolean, initialTab?: 'api' | 'deeplogic'}>(uiState.settingsModalState || {isOpen: false});
+  const [isWardrobeOpen, setWardrobeOpen] = useState(uiState.isWardrobeOpen || false);
+  const [isGalleryOpen, setIsGalleryOpen] = useState(uiState.isGalleryOpen || false); 
   const [isStreaming, setIsStreaming] = useState(false);
   const [activeDungeonThreadId, setActiveDungeonThreadId] = useState<string>(DUNGEON_THREAD_ID);
   
-  // KEY MANAGEMENT STATE
-  const [keyManagerMode, setKeyManagerMode] = useState<'onboarding' | 'unlock' | null>(null);
-
+  const [editingCharacter, setEditingCharacter] = useState<CharacterProfile | null>(null);
+  const [viewingCharacter, setViewingCharacter] = useState<CharacterProfile | null>(null);
+  const [keyManagerMode, setKeyManagerMode] = useState<'onboarding' | 'unlock' | 'settings' | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  // --- UI PERSISTENCE ---
+  useEffect(() => {
+      const currentUI = {
+          isSidebarOpen,
+          settingsModalState,
+          isWardrobeOpen,
+          isGalleryOpen,
+      };
+      localStorage.setItem(UI_STATE_KEY, JSON.stringify(currentUI));
+  }, [isSidebarOpen, settingsModalState, isWardrobeOpen, isGalleryOpen]);
+
+  // --- DATA PERSISTENCE ---
+  useEffect(() => {
+    // Save state but strip sensitive keys from settings before writing to LS
+    const stateToSave = {
+        ...state,
+        settings: { ...state.settings, apiKeyGemini: '', apiKeyGrok: '', apiKeyOpenAI: '' }
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave));
+  }, [state]);
+
+  // --- BACK BUTTON GUARD ---
+  useEffect(() => {
+      try { window.history.pushState({ ui: 'root' }, '', null); } catch(e) {}
+
+      const handlePopState = (event: PopStateEvent) => {
+          let handled = false;
+
+          // 1. Close Modals (Deepest First)
+          if (editingCharacter) { setEditingCharacter(null); handled = true; }
+          else if (viewingCharacter) { setViewingCharacter(null); handled = true; }
+          else if (settingsModalState.isOpen) { setSettingsModalState({ isOpen: false }); handled = true; }
+          else if (isWardrobeOpen) { setWardrobeOpen(false); handled = true; }
+          else if (isGalleryOpen) { setIsGalleryOpen(false); handled = true; }
+          else if (state.isScriptoriumOpen) { setState(prev => ({...prev, isScriptoriumOpen: false})); handled = true; }
+          else if (state.isDungeonOpen) { setState(prev => ({...prev, isDungeonOpen: false})); handled = true; }
+          else if (state.isTowerOpen) { setState(prev => ({...prev, isTowerOpen: false})); handled = true; }
+          else if (isSidebarOpen) { setSidebarOpen(false); handled = true; }
+
+          if (handled) {
+              try { window.history.pushState({ ui: 'root' }, '', null); } catch(e) {}
+          } else {
+              // Exit Intent
+              if (!exitIntent) {
+                  setExitIntent(true);
+                  setShowExitToast(true);
+                  try { window.history.pushState({ ui: 'root' }, '', null); } catch(e) {}
+                  setTimeout(() => { setExitIntent(false); setShowExitToast(false); }, 2500);
+              }
+          }
+      };
+
+      window.addEventListener('popstate', handlePopState);
+      return () => window.removeEventListener('popstate', handlePopState);
+  }, [
+      isSidebarOpen, settingsModalState, isWardrobeOpen, isGalleryOpen,
+      state.isScriptoriumOpen, state.isDungeonOpen, state.isTowerOpen,
+      editingCharacter, viewingCharacter, exitIntent 
+  ]);
+
+  const pushUIState = () => { try { /* Optional manual pushes */ } catch (e) {} };
 
   // --- KEY CHECK ON BOOT ---
   useEffect(() => {
       const checkKeys = async () => {
           // If keys are already in memory (e.g. from session persistence or hardcoded for dev), we are good
-          if (state.settings.apiKeyGemini || state.settings.apiKeyGrok) return;
+          if (state.settings?.apiKeyGemini || state.settings?.apiKeyGrok) return;
 
           try {
               if (!db || !db.secrets) throw new Error("DB Not Ready");
@@ -238,11 +306,27 @@ const App: React.FC = () => {
               if (hasEncrypted) {
                   setKeyManagerMode('unlock');
               } else {
-                  setKeyManagerMode('onboarding');
+                  // Check for plaintext keys to auto-load
+                  const plaintextKeys: Partial<AppSettings> = {};
+                  let foundPlain = false;
+                  
+                  secrets.forEach(s => {
+                      if (s.mode === 'plaintext' && s.value) {
+                          if (s.id === 'gemini') plaintextKeys.apiKeyGemini = s.value;
+                          if (s.id === 'grok') plaintextKeys.apiKeyGrok = s.value;
+                          if (s.id === 'openai') plaintextKeys.apiKeyOpenAI = s.value;
+                          foundPlain = true;
+                      }
+                  });
+
+                  if (foundPlain) {
+                      handleKeysReady(plaintextKeys);
+                  } else {
+                      setKeyManagerMode('onboarding');
+                  }
               }
           } catch (e) {
               console.error("Failed to check secrets DB:", e);
-              // Fallback to onboarding if DB fails
               setKeyManagerMode('onboarding');
           }
       };
@@ -250,29 +334,11 @@ const App: React.FC = () => {
   }, []);
 
   const handleKeysReady = (keys: Partial<AppSettings>) => {
-      setState(prev => ({
-          ...prev,
-          settings: { ...prev.settings, ...keys }
-      }));
+      setState(prev => ({ ...prev, settings: { ...prev.settings, ...keys } }));
       setKeyManagerMode(null);
   };
 
-  // --- PERSISTENCE WITH KEY STRIPPING ---
-  useEffect(() => {
-    // SECURITY: Create a copy of state to save, explicitly stripping sensitive keys
-    const stateToSave = {
-        ...state,
-        settings: {
-            ...state.settings,
-            apiKeyGemini: '',
-            apiKeyGrok: '',
-            apiKeyOpenAI: ''
-        }
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave));
-  }, [state]);
-
-  // --- WAKE CYCLE CHECK ---
+  // --- WAKE CYCLE ---
   useInterval(() => {
       const executeWakeCycle = async () => {
           if (state.settings.firebaseConfig?.apiKey) {
@@ -304,364 +370,152 @@ const App: React.FC = () => {
       return () => clearTimeout(t);
   }, []);
 
-  // --- SELECTORS ---
-  // IMPORTANT: Filter threads by ACTIVE CHARACTER
+  // --- SELECTORS & HELPERS ---
   const getActiveCharacter = () => {
       const found = state.characters.find(c => c.id === state.activeCharacterId);
-      // Fallback with Theme Guarantee
       return found || state.characters[0] || { ...DEFAULT_PROFILE };
   };
-
-  const activeChar = getActiveCharacter(); // Safe access
-
+  const activeChar = getActiveCharacter();
   const getCharacterThreads = () => state.threads.filter(t => t.characterId === state.activeCharacterId);
   const getActiveThread = () => getCharacterThreads().find(t => t.id === state.activeThreadId) || getCharacterThreads()[0] || state.threads[0];
   const getActiveRoom = () => state.rooms.find(r => r.id === state.activeRoomId) || state.rooms[0];
-  
-  // Specific Threads per character
   const getScriptoriumThread = () => getCharacterThreads().find(t => t.type === 'scriptorium') || state.threads.find(t => t.id === SCRIPTORIUM_THREAD_ID) as Thread;
   const getActiveDungeonThread = () => getCharacterThreads().find(t => t.id === activeDungeonThreadId) || getCharacterThreads().find(t => t.type === 'dungeon') || state.threads.find(t => t.id === DUNGEON_THREAD_ID) as Thread;
   const getDungeonThreads = () => getCharacterThreads().filter(t => t.type === 'dungeon');
-
+  
   const getCurrentPortraitUrl = () => {
       const outfit = state.outfits.find(o => o.id === state.currentOutfitId);
       if (outfit && outfit.wornImageUrl) return outfit.wornImageUrl;
       return activeChar.portraitUrl;
   };
 
-  const updateThreadMessages = (threadId: string, newMessages: Message[]) => {
-      setState(prev => ({ ...prev, threads: prev.threads.map(t => t.id === threadId ? { ...t, messages: newMessages, lastUpdated: Date.now() } : t) }));
-  };
-
-  const updateThreadOOC = (threadId: string, newOOC: Message[]) => {
-      setState(prev => ({ ...prev, threads: prev.threads.map(t => t.id === threadId ? { ...t, oocMessages: newOOC, lastUpdated: Date.now() } : t) }));
-  };
-
+  const updateThreadMessages = (threadId: string, newMessages: Message[]) => { setState(prev => ({ ...prev, threads: prev.threads.map(t => t.id === threadId ? { ...t, messages: newMessages, lastUpdated: Date.now() } : t) })); };
+  const updateThreadOOC = (threadId: string, newOOC: Message[]) => { setState(prev => ({ ...prev, threads: prev.threads.map(t => t.id === threadId ? { ...t, oocMessages: newOOC, lastUpdated: Date.now() } : t) })); };
   const updateActiveThreadMessages = (newMessages: Message[]) => { if (state.activeThreadId) updateThreadMessages(state.activeThreadId, newMessages); };
   const updateThreadTitle = (threadId: string, title: string) => { setState(prev => ({ ...prev, threads: prev.threads.map(t => t.id === threadId ? { ...t, title } : t) })); };
 
-  // --- CHARACTER SYSTEM LOGIC ---
-
+  // --- ACTIONS ---
+  
   const handleSelectCharacter = (id: string) => {
+      const char = state.characters.find(c => c.id === id);
+      if (!char) return;
+      const updatedChars = state.characters.map(c => c.id === id ? { ...c, lastUsedAt: Date.now() } : c);
       const charThreads = state.threads.filter(t => t.characterId === id);
       let nextThreadId = charThreads.find(t => t.type === 'ritual' || t.type === 'static')?.id;
-      if (!nextThreadId && charThreads.length > 0) nextThreadId = charThreads[0].id;
-
-      setState(prev => ({
-          ...prev,
-          activeCharacterId: id,
-          activeThreadId: nextThreadId || null,
-          character: prev.characters.find(c => c.id === id) || prev.character 
-      }));
+      
+      const newThreads = [...state.threads];
+      if (!nextThreadId) {
+          const newThread: Thread = { id: uuidv4(), characterId: id, type: 'ritual', title: 'New Ritual', messages: [], oocMessages: [], lastUpdated: Date.now() };
+          newThreads.push(newThread);
+          nextThreadId = newThread.id;
+      }
+      setState(prev => ({ ...prev, characters: updatedChars, threads: newThreads, activeCharacterId: id, activeThreadId: nextThreadId || null, character: char }));
   };
-
+  
   const handleUseTemplate = (template: CharacterProfile) => {
       const newCharId = uuidv4();
-      const newCharacter: CharacterProfile = {
-          ...template,
-          id: newCharId,
-          baseTemplateId: template.id,
-          versionNumber: 1,
-          isTemplate: false,
-          createdAt: Date.now(),
-          lastUsedAt: Date.now()
-      };
-
+      const newCharacter: CharacterProfile = { ...template, id: newCharId, baseTemplateId: template.id, versionNumber: 1, isTemplate: false, createdAt: Date.now(), lastUsedAt: Date.now() };
       const staticThread: Thread = { id: uuidv4(), characterId: newCharId, type: 'static', title: 'Static Connection', messages: [], oocMessages: [], lastUpdated: Date.now() };
       const scriptoriumThread: Thread = { id: uuidv4(), characterId: newCharId, type: 'scriptorium', title: 'The Desk', messages: [], oocMessages: [], lastUpdated: Date.now() };
       const dungeonThread: Thread = { id: uuidv4(), characterId: newCharId, type: 'dungeon', title: 'The Gauntlet', messages: [], oocMessages: [], lastUpdated: Date.now() };
       const mainThread: Thread = { id: uuidv4(), characterId: newCharId, type: 'ritual', title: 'First Ritual', messages: [], oocMessages: [], lastUpdated: Date.now() };
-
-      setState(prev => ({
-          ...prev,
-          characters: [...prev.characters, newCharacter],
-          threads: [...prev.threads, staticThread, scriptoriumThread, dungeonThread, mainThread],
-          activeCharacterId: newCharId,
-          activeThreadId: mainThread.id,
-          character: newCharacter,
-          isGalleryOpen: false 
-      }));
+      setState(prev => ({ ...prev, characters: [...prev.characters, newCharacter], threads: [...prev.threads, staticThread, scriptoriumThread, dungeonThread, mainThread], activeCharacterId: newCharId, activeThreadId: mainThread.id, character: newCharacter, isGalleryOpen: false }));
+      pushUIState(); setEditingCharacter(newCharacter);
   };
 
-  // --- Core Action Logic ---
+  const handleUpdateCharacter = (updatedChar: CharacterProfile) => { setState(prev => ({ ...prev, characters: prev.characters.map(c => c.id === updatedChar.id ? updatedChar : c), character: prev.activeCharacterId === updatedChar.id ? updatedChar : prev.character })); };
+  const handleDeleteCharacter = (id: string) => {
+      if (state.characters.length <= 1) { alert("Cannot delete the last character."); return; }
+      if (!confirm("Are you sure? This will delete all threads and history for this character.")) return;
+      const remainingChars = state.characters.filter(c => c.id !== id);
+      const remainingThreads = state.threads.filter(t => t.characterId !== id);
+      let nextActiveId = state.activeCharacterId;
+      if (id === state.activeCharacterId) { nextActiveId = remainingChars[0].id; }
+      const nextThreads = remainingThreads.filter(t => t.characterId === nextActiveId);
+      const nextThreadId = nextThreads.length > 0 ? nextThreads[0].id : null;
+      setState(prev => ({ ...prev, characters: remainingChars, threads: remainingThreads, activeCharacterId: nextActiveId, activeThreadId: nextThreadId, character: remainingChars.find(c => c.id === nextActiveId) || remainingChars[0] }));
+  };
+  const handleDuplicateCharacter = (char: CharacterProfile) => {
+      const newId = uuidv4();
+      const copy: CharacterProfile = { ...char, id: newId, name: `${char.name} (Copy)`, versionNumber: 1, createdAt: Date.now(), lastUsedAt: Date.now() };
+      const mainThread: Thread = { id: uuidv4(), characterId: newId, type: 'ritual', title: 'First Ritual', messages: [], oocMessages: [], lastUpdated: Date.now() };
+      setState(prev => ({ ...prev, characters: [...prev.characters, copy], threads: [...prev.threads, mainThread] }));
+  };
 
-  const performGeneration = async (
-      messagesContext: Message[], 
-      modelMsgId: string, 
-      isRegeneration: boolean,
-      overrideSettings?: Partial<AppSettings>,
-      startText: string = '',
-      targetThreadId?: string,
-      dungeonMode?: 'dm' | 'player',
-      injectionPrompt?: string 
-  ) => {
+  const handleCreateReportThread = (initialContent: string, context: string) => {
+      const newThread: Thread = {
+          id: uuidv4(),
+          characterId: state.activeCharacterId,
+          type: 'report',
+          title: `AI Report: ${context} (${new Date().toLocaleDateString()})`,
+          messages: [{
+              id: uuidv4(),
+              role: 'model',
+              content: initialContent,
+              versions: [initialContent],
+              activeVersionIndex: 0,
+              timestamp: Date.now(),
+              speaker: 'System'
+          }],
+          oocMessages: [],
+          lastUpdated: Date.now()
+      };
+      
+      setState(prev => ({
+          ...prev,
+          threads: [newThread, ...prev.threads],
+          activeThreadId: newThread.id
+      }));
+      setEditingCharacter(null); // Close editor
+  };
+
+  // --- GENERATION HANDLERS ---
+  const performGeneration = async (messagesContext: Message[], modelMsgId: string, isRegeneration: boolean, overrideSettings?: Partial<AppSettings>, startText: string = '', targetThreadId?: string, dungeonMode?: 'dm' | 'player', injectionPrompt?: string) => {
     setIsStreaming(true);
     abortControllerRef.current = new AbortController();
-
     let fullResponseText = startText;
     const effectiveSettings = { ...state.settings, ...overrideSettings };
     const threadIdToUpdate = targetThreadId || state.activeThreadId;
-    
     const targetThread = state.threads.find(t => t.id === threadIdToUpdate);
     const isScriptoriumGen = targetThread?.type === 'scriptorium';
     const isDungeonGen = targetThread?.type === 'dungeon';
 
     try {
-        const room = isScriptoriumGen 
-            ? { ...DEFAULT_ROOMS[0], name: 'Scriptorium', description: 'The Administrative Domain.', systemPromptOverride: state.scriptoriumConfig.systemPrompt } 
-            : isDungeonGen
-                ? { ...DEFAULT_ROOMS[0], name: 'The Gauntlet', description: 'A table set in shadows.', systemPromptOverride: state.dungeonConfig.dmSystemPrompt }
-                : getActiveRoom();
-            
+        const room = isScriptoriumGen ? { ...DEFAULT_ROOMS[0], name: 'Scriptorium', description: 'The Administrative Domain.', systemPromptOverride: state.scriptoriumConfig.systemPrompt } : isDungeonGen ? { ...DEFAULT_ROOMS[0], name: 'The Gauntlet', description: 'A table set in shadows.', systemPromptOverride: state.dungeonConfig.dmSystemPrompt } : getActiveRoom();
         const currentOutfit = state.outfits.find(o => o.id === state.currentOutfitId);
-        
-        let effectiveSystemPrompt = activeChar.systemPrompt;
-        
-        const mappingBlock = activeChar.mappingLogic 
-            ? `\n\n[STRICT SPATIAL ADHERENCE REQUIRED]\n${activeChar.mappingLogic}\n` 
-            : '';
-
-        if (isScriptoriumGen) {
-            effectiveSystemPrompt = state.scriptoriumConfig.systemPrompt;
-        } else if (isDungeonGen) {
-            if (dungeonMode === 'dm') {
-                effectiveSystemPrompt = state.dungeonConfig.dmSystemPrompt;
-            } else {
-                const persona = `\n[CURRENT DEMEANOR: ${state.dungeonConfig.ysaraithDemeanorInfo || state.dungeonConfig.ysaraithDemeanorLabel}]\n`;
-                effectiveSystemPrompt = `${activeChar.systemPrompt}${mappingBlock}\n${YSARAITH_PLAYER_PROMPT_ADDENDUM}${persona}`;
-            }
-        } else {
-            effectiveSystemPrompt = `${activeChar.systemPrompt}${mappingBlock}\n[CURRENT OUTFIT: ${currentOutfit?.name} - ${currentOutfit?.description}]`;
-        }
-
-        if (effectiveSettings.roleplayIntensity !== undefined || effectiveSettings.writingStyle || effectiveSettings.formattingStyle) {
-            effectiveSystemPrompt += `\n\n**STYLE MODIFIERS:**\n`;
-            if (effectiveSettings.roleplayIntensity < 50) effectiveSystemPrompt += `- Adherence: Relaxed. Breaks in character are permissible for clarity.\n`;
-            else effectiveSystemPrompt += `- Adherence: Strict (${effectiveSettings.roleplayIntensity}%). Total immersion.\n`;
-
-            if (effectiveSettings.writingStyle === 'plain') effectiveSystemPrompt += `- Style: Direct, concise, functional.\n`;
-            else if (effectiveSettings.writingStyle === 'ornate') effectiveSystemPrompt += `- Style: Poetic, vivid, sensory-rich, dramatic.\n`;
-            
-            if (effectiveSettings.formattingStyle === 'bubbles') effectiveSystemPrompt += `- Format: Casual messaging style. Short bursts.\n`;
-            else if (effectiveSettings.formattingStyle === 'screenplay') effectiveSystemPrompt += `- Format: Screenplay (Action lines, Dialogue tags).\n`;
-            else if (effectiveSettings.formattingStyle === 'markdown') effectiveSystemPrompt += `- Format: Heavy use of Markdown headers/lists.\n`;
-        }
-
-        if (injectionPrompt) {
-            effectiveSystemPrompt += `\n\n${injectionPrompt}\n`;
-        }
-
+        let effectiveSystemPrompt = "";
+        if (isScriptoriumGen) { effectiveSystemPrompt = state.scriptoriumConfig.systemPrompt; } else if (isDungeonGen) { if (dungeonMode === 'dm') { effectiveSystemPrompt = state.dungeonConfig.dmSystemPrompt; } else { const persona = `\n[CURRENT DEMEANOR: ${state.dungeonConfig.ysaraithDemeanorInfo || state.dungeonConfig.ysaraithDemeanorLabel}]\n`; const base = compileCharacterSystemPrompt(activeChar); effectiveSystemPrompt = `${base}\n${YSARAITH_PLAYER_PROMPT_ADDENDUM}${persona}`; } } else { effectiveSystemPrompt = compileCharacterSystemPrompt(activeChar); effectiveSystemPrompt += `\n\n[CURRENT OUTFIT: ${currentOutfit?.name} - ${currentOutfit?.description}]`; }
+        if (effectiveSettings.roleplayIntensity !== undefined || effectiveSettings.writingStyle || effectiveSettings.formattingStyle) { effectiveSystemPrompt += `\n\n**STYLE MODIFIERS:**\n`; if (effectiveSettings.roleplayIntensity < 50) effectiveSystemPrompt += `- Adherence: Relaxed. Breaks in character are permissible for clarity.\n`; else effectiveSystemPrompt += `- Adherence: Strict (${effectiveSettings.roleplayIntensity}%). Total immersion.\n`; }
+        if (injectionPrompt) { effectiveSystemPrompt += `\n\n${injectionPrompt}\n`; }
         const augmentedCharacter = { ...activeChar, systemPrompt: effectiveSystemPrompt };
-
-        const onChunk = (text: string) => {
-            fullResponseText += text;
-            setState(prev => ({
-                ...prev,
-                threads: prev.threads.map(t => {
-                    if (t.id !== threadIdToUpdate) return t;
-                    const msgs = t.messages.map(m => {
-                        if (m.id === modelMsgId) {
-                            const newVersions = [...m.versions];
-                            newVersions[m.activeVersionIndex] = fullResponseText;
-                            return { ...m, versions: newVersions, content: fullResponseText, speaker: (isDungeonGen ? (dungeonMode === 'dm' ? 'DM' : 'Ysaraith') : undefined) as Message['speaker'] };
-                        }
-                        return m;
-                    });
-                    return { ...t, messages: msgs };
-                })
-            }));
-        };
-
-        if (effectiveSettings.activeProvider === 'gemini') {
-            await streamGeminiResponse(
-                messagesContext, room, effectiveSettings, augmentedCharacter, state.moodState, onChunk, abortControllerRef.current.signal, isScriptoriumGen ? state.scriptoriumConfig.tools : undefined 
-            );
-        } else {
-            await streamGrokResponse(
-                messagesContext, room, effectiveSettings, augmentedCharacter, onChunk, abortControllerRef.current.signal
-            );
-        }
-
-        if (state.settings.oocAssistEnabled && !isScriptoriumGen && !isDungeonGen && !isRegeneration && !injectionPrompt) {
-            setTimeout(() => { performAdvisoryGeneration(messagesContext, fullResponseText, threadIdToUpdate || STATIC_THREAD_ID); }, 1000);
-        }
-
-    } catch (error: any) {
-        console.error("Generation Error:", error);
-        let errorMsg = `[System Error: ${error.message || 'Unknown Connection Failure'}]`;
-        try {
-            const raw = error.message || '';
-            const jsonMatch = raw.match(/"message":\s*"([^"]+)"/);
-            if (jsonMatch && jsonMatch[1]) errorMsg = `[System Error: ${jsonMatch[1]}]`;
-        } catch (e) {}
-
-        setState(prev => ({
-            ...prev,
-            threads: prev.threads.map(t => {
-                if (t.id !== threadIdToUpdate) return t;
-                const msgs = t.messages.map(m => { if (m.id === modelMsgId) { return { ...m, content: errorMsg, versions: [errorMsg] }; } return m; });
-                return { ...t, messages: msgs };
-            })
-        }));
-    } finally {
-        setIsStreaming(false);
-        abortControllerRef.current = null;
-    }
+        const onChunk = (text: string) => { fullResponseText += text; setState(prev => ({ ...prev, threads: prev.threads.map(t => { if (t.id !== threadIdToUpdate) return t; const msgs = t.messages.map(m => { if (m.id === modelMsgId) { const newVersions = [...m.versions]; newVersions[m.activeVersionIndex] = fullResponseText; return { ...m, versions: newVersions, content: fullResponseText, speaker: (isDungeonGen ? (dungeonMode === 'dm' ? 'DM' : 'Ysaraith') : undefined) as Message['speaker'] }; } return m; }); return { ...t, messages: msgs }; }) })); };
+        if (effectiveSettings.activeProvider === 'gemini') { await streamGeminiResponse(messagesContext, room, effectiveSettings, augmentedCharacter, state.moodState, onChunk, abortControllerRef.current.signal, isScriptoriumGen ? state.scriptoriumConfig.tools : undefined); } else { await streamGrokResponse(messagesContext, room, effectiveSettings, augmentedCharacter, onChunk, abortControllerRef.current.signal); }
+        if (state.settings.oocAssistEnabled && !isScriptoriumGen && !isDungeonGen && !isRegeneration && !injectionPrompt) { setTimeout(() => { performAdvisoryGeneration(messagesContext, fullResponseText, threadIdToUpdate || STATIC_THREAD_ID); }, 1000); }
+    } catch (error: any) { console.error("Generation Error:", error); let errorMsg = `[System Error: ${error.message || 'Unknown Connection Failure'}]`; try { const raw = error.message || ''; const jsonMatch = raw.match(/"message":\s*"([^"]+)"/); if (jsonMatch && jsonMatch[1]) errorMsg = `[System Error: ${jsonMatch[1]}]`; } catch (e) {} setState(prev => ({ ...prev, threads: prev.threads.map(t => { if (t.id !== threadIdToUpdate) return t; const msgs = t.messages.map(m => { if (m.id === modelMsgId) { return { ...m, content: errorMsg, versions: [errorMsg] }; } return m; }); return { ...t, messages: msgs }; }) })); } finally { setIsStreaming(false); abortControllerRef.current = null; }
   };
 
   const performAdvisoryGeneration = async (context: Message[], lastResponse: string, threadId: string) => {
-      const recentHistory = context.slice(-3); 
-      const fullContextText = recentHistory.map(m => `${m.role}: ${m.content}`).join('\n') + `\nmodel: ${lastResponse}`;
-      let advisoryPrompt = OOC_ADVISORY_SYSTEM_PROMPT;
-
-      if (state.settings.oocPersona === 'character') {
-          advisoryPrompt = `**MODE: PROACTIVE ADVISORY (IN-CHARACTER)**\nIdentity: ${activeChar.name}.\nGoal: Guide story without breaking persona.\nCriteria: Logical errors, lore breaks.`;
-      }
-      advisoryPrompt += `\n**Context:**\n${fullContextText}`;
-
-      let advisoryText = "";
-      try {
-          const tempChar = { ...activeChar, systemPrompt: advisoryPrompt };
-          if (state.settings.activeProvider === 'gemini') {
-              await streamGeminiResponse([{ id: 'sys', role: 'user', content: "Analyze.", versions: [], activeVersionIndex: 0, timestamp: Date.now() }], { ...DEFAULT_ROOMS[0], name: 'Advisory', description: '' }, { ...state.settings, maxOutputTokens: 150 }, tempChar, state.moodState, (chunk) => { advisoryText += chunk; });
-          } else {
-              await streamGrokResponse([{ id: 'sys', role: 'user', content: "Analyze.", versions: [], activeVersionIndex: 0, timestamp: Date.now() }], { ...DEFAULT_ROOMS[0], name: 'Advisory', description: '' }, { ...state.settings, maxOutputTokens: 150 }, tempChar, (chunk) => { advisoryText += chunk; });
-          }
-
-          if (advisoryText.trim() && !advisoryText.includes("NO_ADVISORY")) {
-              const newOOCMsg: Message = { id: uuidv4(), role: 'model', content: advisoryText.trim(), versions: [advisoryText.trim()], activeVersionIndex: 0, timestamp: Date.now() };
-              const currentThread = state.threads.find(t => t.id === threadId);
-              if (currentThread) {
-                  const updatedOOC = [...(currentThread.oocMessages || []), newOOCMsg];
-                  updateThreadOOC(threadId, updatedOOC);
-                  setState(prev => ({ ...prev, hasUnreadOOC: true }));
-              }
-          }
-      } catch (e) { console.error("Advisory Gen Failed", e); }
+      const recentHistory = context.slice(-3); const fullContextText = recentHistory.map(m => `${m.role}: ${m.content}`).join('\n') + `\nmodel: ${lastResponse}`; let advisoryPrompt = OOC_ADVISORY_SYSTEM_PROMPT; if (state.settings.oocPersona === 'character') { advisoryPrompt = `**MODE: PROACTIVE ADVISORY (IN-CHARACTER)**\nIdentity: ${activeChar.name}.\nGoal: Guide story without breaking persona.\nCriteria: Logical errors, lore breaks.`; } advisoryPrompt += `\n**Context:**\n${fullContextText}`; let advisoryText = ""; try { const tempChar = { ...activeChar, systemPrompt: advisoryPrompt }; if (state.settings.activeProvider === 'gemini') { await streamGeminiResponse([{ id: 'sys', role: 'user', content: "Analyze.", versions: [], activeVersionIndex: 0, timestamp: Date.now() }], { ...DEFAULT_ROOMS[0], name: 'Advisory', description: '' }, { ...state.settings, maxOutputTokens: 150 }, tempChar, state.moodState, (chunk) => { advisoryText += chunk; }); } else { await streamGrokResponse([{ id: 'sys', role: 'user', content: "Analyze.", versions: [], activeVersionIndex: 0, timestamp: Date.now() }], { ...DEFAULT_ROOMS[0], name: 'Advisory', description: '' }, { ...state.settings, maxOutputTokens: 150 }, tempChar, (chunk) => { advisoryText += chunk; }); } if (advisoryText.trim() && !advisoryText.includes("NO_ADVISORY")) { const newOOCMsg: Message = { id: uuidv4(), role: 'model', content: advisoryText.trim(), versions: [advisoryText.trim()], activeVersionIndex: 0, timestamp: Date.now() }; const currentThread = state.threads.find(t => t.id === threadId); if (currentThread) { const updatedOOC = [...(currentThread.oocMessages || []), newOOCMsg]; updateThreadOOC(threadId, updatedOOC); setState(prev => ({ ...prev, hasUnreadOOC: true })); } } } catch (e) { console.error("Advisory Gen Failed", e); }
   };
 
   const performOOCGeneration = async (oocHistory: Message[], narrativeContext: Message[], targetThreadId: string) => {
-      setIsStreaming(true);
-      abortControllerRef.current = new AbortController();
-      let fullResponseText = "";
-      const modelMsgId = uuidv4();
-      
-      const updatedOOC = [...oocHistory, { id: modelMsgId, role: 'model', content: '', versions: [''], activeVersionIndex: 0, timestamp: Date.now() } as Message];
-      updateThreadOOC(targetThreadId, updatedOOC);
-
-      let verbosityInstruction = "";
-      switch (state.settings.oocVerboseMode) {
-          case 1: verbosityInstruction = "Be extremely concise."; break;
-          case 3: verbosityInstruction = "Be verbose and detailed."; break;
-          default: verbosityInstruction = "Maintain balanced length."; break;
-      }
-
-      let baseOocPrompt = OOC_SYSTEM_PROMPT; 
-      if (state.settings.oocPersona === 'character') {
-          baseOocPrompt = `**MODE: METAGAMING (IN-CHARACTER)**\nIdentity: ${activeChar.name}.\nGoal: Discuss meta-topics in character.`;
-      }
-
-      const narrativeSummary = narrativeContext.slice(-5).map(m => `${m.role === 'model' ? activeChar.name : 'User'}: ${m.content}`).join('\n');
-      const systemPrompt = `${baseOocPrompt}\n**Constraint:** ${verbosityInstruction}\n[RECENT NARRATIVE]\n${narrativeSummary}`;
-      const augmentedCharacter = { ...activeChar, systemPrompt };
-
-      const onChunk = (text: string) => {
-          fullResponseText += text;
-          setState(prev => ({ ...prev, threads: prev.threads.map(t => { if (t.id !== targetThreadId) return t; const newOOC = t.oocMessages?.map(m => { if (m.id === modelMsgId) return { ...m, content: fullResponseText }; return m; }); return { ...t, oocMessages: newOOC }; }) }));
-      };
-
-      try {
-           if (state.settings.activeProvider === 'gemini') {
-                await streamGeminiResponse(updatedOOC, { ...DEFAULT_ROOMS[0], name: 'OOC Channel', description: 'Meta-space' }, state.settings, augmentedCharacter, state.moodState, onChunk, abortControllerRef.current.signal);
-           } else {
-                await streamGrokResponse(updatedOOC, { ...DEFAULT_ROOMS[0], name: 'OOC Channel', description: 'Meta-space' }, state.settings, augmentedCharacter, onChunk, abortControllerRef.current.signal);
-           }
-      } catch (e: any) {
-          console.error("OOC Gen Failed", e);
-          const errorMsg = `[Connection Error: ${e.message}]`;
-          setState(prev => ({ ...prev, threads: prev.threads.map(t => { if (t.id !== targetThreadId) return t; const newOOC = t.oocMessages?.map(m => { if (m.id === modelMsgId) return { ...m, content: errorMsg }; return m; }); return { ...t, oocMessages: newOOC }; }) }));
-      } finally {
-          setIsStreaming(false);
-          abortControllerRef.current = null;
-      }
+      setIsStreaming(true); abortControllerRef.current = new AbortController(); let fullResponseText = ""; const modelMsgId = uuidv4(); const updatedOOC = [...oocHistory, { id: modelMsgId, role: 'model', content: '', versions: [''], activeVersionIndex: 0, timestamp: Date.now() } as Message]; updateThreadOOC(targetThreadId, updatedOOC); let verbosityInstruction = ""; switch (state.settings.oocVerboseMode) { case 1: verbosityInstruction = "Be extremely concise."; break; case 3: verbosityInstruction = "Be verbose and detailed."; break; default: verbosityInstruction = "Maintain balanced length."; break; } let baseOocPrompt = OOC_SYSTEM_PROMPT; if (state.settings.oocPersona === 'character') { baseOocPrompt = `**MODE: METAGAMING (IN-CHARACTER)**\nIdentity: ${activeChar.name}.\nGoal: Discuss meta-topics in character.`; } const narrativeSummary = narrativeContext.slice(-5).map(m => `${m.role === 'model' ? activeChar.name : 'User'}: ${m.content}`).join('\n'); const systemPrompt = `${baseOocPrompt}\n**Constraint:** ${verbosityInstruction}\n[RECENT NARRATIVE]\n${narrativeSummary}`; const augmentedCharacter = { ...activeChar, systemPrompt }; const onChunk = (text: string) => { fullResponseText += text; setState(prev => ({ ...prev, threads: prev.threads.map(t => { if (t.id !== targetThreadId) return t; const newOOC = t.oocMessages?.map(m => { if (m.id === modelMsgId) return { ...m, content: fullResponseText }; return m; }); return { ...t, oocMessages: newOOC }; }) })); }; try { if (state.settings.activeProvider === 'gemini') { await streamGeminiResponse(updatedOOC, { ...DEFAULT_ROOMS[0], name: 'OOC Channel', description: 'Meta-space' }, state.settings, augmentedCharacter, state.moodState, onChunk, abortControllerRef.current.signal); } else { await streamGrokResponse(updatedOOC, { ...DEFAULT_ROOMS[0], name: 'OOC Channel', description: 'Meta-space' }, state.settings, augmentedCharacter, onChunk, abortControllerRef.current.signal); } } catch (e: any) { console.error("OOC Gen Failed", e); const errorMsg = `[Connection Error: ${e.message}]`; setState(prev => ({ ...prev, threads: prev.threads.map(t => { if (t.id !== targetThreadId) return t; const newOOC = t.oocMessages?.map(m => { if (m.id === modelMsgId) return { ...m, content: errorMsg }; return m; }); return { ...t, oocMessages: newOOC }; }) })); } finally { setIsStreaming(false); abortControllerRef.current = null; }
   };
 
-  const handleExportTxt = () => {
-      let output = `PROJECT CERBERUS EXPORT\nGenerated: ${new Date().toLocaleString()}\n=================================================\n\n`;
-      getCharacterThreads().forEach(t => {
-          output += `THREAD: ${t.title} [${t.type.toUpperCase()}]\nID: ${t.id}\n-------------------------------------------------\n\n`;
-          if (t.messages.length === 0) output += `(No messages)\n`;
-          else t.messages.forEach(m => { const author = m.role === 'model' ? (m.speaker || activeChar.name) : (state.settings.userName || 'User'); const time = new Date(m.timestamp).toLocaleString(); output += `[${author} - ${time}]\n${m.content}\n\n-------------------------------------------------\n\n`; });
-          output += `\n\n`;
-      });
-      const blob = new Blob([output], { type: "text/plain" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a'); link.href = url; link.download = `cerberus_chat_export_${Date.now()}.txt`; link.click(); URL.revokeObjectURL(url);
-  };
-
-  useInterval(() => {
-      const nowTs = Date.now();
-      const diffMinutes = (nowTs - state.lastInteractionTimestamp) / 1000 / 60;
-      let newMode: AgentMode = state.agentMode;
-      if (state.agentMode === 'active' && diffMinutes > state.deepLogic.activeTimeout) newMode = 'passive';
-      let newMoodState = decayStats(state.moodState);
-      if (newMode === 'passive') executePassiveLoop(state, (entry) => logToSheet(state.deepLogic.secrets.sheetId, 'AuditLog', { type: 'PASSIVE_ACTION', entry }));
-      setState(prev => ({ ...prev, agentMode: newMode, moodState: newMoodState }));
-  }, 60000);
-
+  // --- STANDARD HANDLERS ---
   const handleStopGeneration = () => { if (abortControllerRef.current) { abortControllerRef.current.abort(); abortControllerRef.current = null; setIsStreaming(false); } };
   const handleDeleteMessage = (messageId: string) => { const activeThread = getActiveThread(); const newMessages = activeThread.messages.filter(m => m.id !== messageId); updateActiveThreadMessages(newMessages); };
   const handleVersionChange = (messageId: string, newIndex: number) => { const activeThread = getActiveThread(); const updatedMessages = activeThread.messages.map(m => { if (m.id === messageId && newIndex >= 0 && newIndex < m.versions.length) { return { ...m, activeVersionIndex: newIndex, content: m.versions[newIndex] }; } return m; }); updateActiveThreadMessages(updatedMessages); };
-
   const handleReiterate = async (messageId: string, mode: 'context' | 'logic') => {
-      const activeThread = getActiveThread();
-      const targetIndex = activeThread.messages.findIndex(m => m.id === messageId);
-      if (targetIndex === -1) return;
-      const targetMsg = activeThread.messages[targetIndex];
-      let promptInjection = "";
-      if (mode === 'logic') promptInjection = `[SYSTEM INTERVENTION: LOGIC AUDIT]\nStop. A Spatial or Meta-gaming violation was detected.\nRewrite strictly adhering to physics and logic.`;
-      else promptInjection = `[SYSTEM INTERVENTION: REITERATE - NARRATIVE FOCUS]\nStop. Re-read previous messages. Trace cause and effect.\nGenerate a response that logically follows events.`;
-
-      if (targetMsg.role === 'model') {
-          const newVersionIndex = targetMsg.versions.length;
-          const updatedMessages = activeThread.messages.map(m => { if (m.id === targetMsg.id) { return { ...m, versions: [...m.versions, ''], activeVersionIndex: newVersionIndex, content: '' }; } return m; });
-          updateActiveThreadMessages(updatedMessages);
-          const apiContext = activeThread.messages.slice(0, targetIndex);
-          await performGeneration(apiContext, targetMsg.id, true, undefined, '', undefined, undefined, promptInjection);
-      } 
+      const activeThread = getActiveThread(); const targetIndex = activeThread.messages.findIndex(m => m.id === messageId); if (targetIndex === -1) return; const targetMsg = activeThread.messages[targetIndex]; let promptInjection = ""; if (mode === 'logic') promptInjection = `[SYSTEM INTERVENTION: LOGIC AUDIT]\nStop. A Spatial or Meta-gaming violation was detected.\nRewrite strictly adhering to physics and logic.`; else promptInjection = `[SYSTEM INTERVENTION: REITERATE - NARRATIVE FOCUS]\nStop. Re-read previous messages. Trace cause and effect.\nGenerate a response that logically follows events.`; if (targetMsg.role === 'model') { const newVersionIndex = targetMsg.versions.length; const updatedMessages = activeThread.messages.map(m => { if (m.id === targetMsg.id) { return { ...m, versions: [...m.versions, ''], activeVersionIndex: newVersionIndex, content: '' }; } return m; }); updateActiveThreadMessages(updatedMessages); const apiContext = activeThread.messages.slice(0, targetIndex); await performGeneration(apiContext, targetMsg.id, true, undefined, '', undefined, undefined, promptInjection); }
   };
-
   const handleCreateThread = () => { const newThread: Thread = { id: uuidv4(), characterId: state.activeCharacterId, type: 'ritual', title: 'New Ritual', messages: [], oocMessages: [], lastUpdated: Date.now() }; setState(prev => ({ ...prev, threads: [newThread, ...prev.threads], activeThreadId: newThread.id })); };
   const handleCreateDungeonThread = () => { const newThread: Thread = { id: uuidv4(), characterId: state.activeCharacterId, type: 'dungeon', title: `Campaign ${getDungeonThreads().length + 1}`, messages: [], oocMessages: [], lastUpdated: Date.now() }; setState(prev => ({ ...prev, threads: [...prev.threads, newThread] })); setActiveDungeonThreadId(newThread.id); };
   const handleDeleteThread = (id: string) => { if (id === STATIC_THREAD_ID || id === SCRIPTORIUM_THREAD_ID || id === DUNGEON_THREAD_ID) return; const newThreads = state.threads.filter(t => t.id !== id); setState(prev => ({ ...prev, threads: newThreads, activeThreadId: prev.activeThreadId === id ? STATIC_THREAD_ID : prev.activeThreadId })); };
   const handleExport = () => { const dataStr = JSON.stringify(state.threads, null, 2); const blob = new Blob([dataStr], { type: "application/json" }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `project_cerberus_export_${Date.now()}.json`; link.click(); };
-
   const handleSendMessageGeneric = async (content: string, threadId: string, dungeonMode?: 'dm' | 'player') => {
-      const thread = state.threads.find(t => t.id === threadId);
-      if (!thread) return;
-      const userMsg: Message = { id: uuidv4(), role: 'user', content, versions: [content], activeVersionIndex: 0, timestamp: Date.now() };
-      const updatedMessages = [...thread.messages, userMsg];
-      updateThreadMessages(threadId, updatedMessages);
-
-      if (thread.type !== 'scriptorium' && thread.type !== 'dungeon') {
-          let eventType = 'USER_MESSAGE_SHORT';
-          if (content.length > 50) eventType = 'USER_MESSAGE_LONG';
-          if (content.toLowerCase().includes('love') || content.toLowerCase().includes('please')) eventType = 'USER_FLIRT';
-          if (content.toLowerCase().includes('good') || content.toLowerCase().includes('thank')) eventType = 'USER_PRAISES';
-          const newMoodState = applyEvent(state.moodState, eventType as any);
-          setState(prev => ({ ...prev, lastInteractionTimestamp: Date.now(), agentMode: 'active', moodState: newMoodState }));
-      }
-      if (thread.messages.length === 0 && thread.type === 'ritual') {
-          const words = content.split(' ').slice(0, 5).join(' ');
-          updateThreadTitle(thread.id, words + '...');
-      }
-      const modelMsgId = uuidv4();
-      const modelMsg: Message = { id: modelMsgId, role: 'model', content: '', versions: [''], activeVersionIndex: 0, timestamp: Date.now(), speaker: dungeonMode === 'dm' ? 'DM' : (thread.type === 'dungeon' ? 'Ysaraith' : undefined) };
-      const messagesWithModel = [...updatedMessages, modelMsg];
-      updateThreadMessages(threadId, messagesWithModel);
-      await performGeneration(updatedMessages, modelMsgId, false, undefined, '', threadId, dungeonMode);
+      const thread = state.threads.find(t => t.id === threadId); if (!thread) return; const userMsg: Message = { id: uuidv4(), role: 'user', content, versions: [content], activeVersionIndex: 0, timestamp: Date.now() }; const updatedMessages = [...thread.messages, userMsg]; updateThreadMessages(threadId, updatedMessages); if (thread.type !== 'scriptorium' && thread.type !== 'dungeon') { let eventType = 'USER_MESSAGE_SHORT'; if (content.length > 50) eventType = 'USER_MESSAGE_LONG'; if (content.toLowerCase().includes('love') || content.toLowerCase().includes('please')) eventType = 'USER_FLIRT'; if (content.toLowerCase().includes('good') || content.toLowerCase().includes('thank')) eventType = 'USER_PRAISES'; const newMoodState = applyEvent(state.moodState, eventType as any); setState(prev => ({ ...prev, lastInteractionTimestamp: Date.now(), agentMode: 'active', moodState: newMoodState })); } if (thread.messages.length === 0 && thread.type === 'ritual') { const words = content.split(' ').slice(0, 5).join(' '); updateThreadTitle(thread.id, words + '...'); } const modelMsgId = uuidv4(); const modelMsg: Message = { id: modelMsgId, role: 'model', content: '', versions: [''], activeVersionIndex: 0, timestamp: Date.now(), speaker: dungeonMode === 'dm' ? 'DM' : (thread.type === 'dungeon' ? 'Ysaraith' : undefined) }; const messagesWithModel = [...updatedMessages, modelMsg]; updateThreadMessages(threadId, messagesWithModel); await performGeneration(updatedMessages, modelMsgId, false, undefined, '', threadId, dungeonMode);
   };
-
   const handleSendMessage = (content: string) => { if (!state.activeThreadId) return; handleSendMessageGeneric(content, state.activeThreadId); };
   const handleSendOOC = async (content: string) => { if (!state.activeThreadId) return; const thread = getActiveThread(); const userMsg: Message = { id: uuidv4(), role: 'user', content, versions: [content], activeVersionIndex: 0, timestamp: Date.now() }; const updatedOOC = [...(thread.oocMessages || []), userMsg]; updateThreadOOC(thread.id, updatedOOC); await performOOCGeneration(updatedOOC, thread.messages, thread.id); };
   const handleDeleteOOC = (msgId: string) => { const activeThread = getActiveThread(); if (!activeThread.oocMessages) return; const newOOC = activeThread.oocMessages.filter(m => m.id !== msgId); updateThreadOOC(activeThread.id, newOOC); };
@@ -675,7 +529,7 @@ const App: React.FC = () => {
   const handleContinueGeneration = async () => { const activeThread = getActiveThread(); const lastMsg = activeThread.messages[activeThread.messages.length - 1]; if (!lastMsg || lastMsg.role !== 'model') return; const continuationPrompt: Message = { id: 'temp-continue', role: 'user', content: "[System: Your last message ended abruptly. Please complete the final sentence or thought immediately. Limit to 40 words.]", versions: [], activeVersionIndex: 0, timestamp: Date.now() }; const apiContext = [...activeThread.messages, continuationPrompt]; const currentContent = lastMsg.content; await performGeneration(apiContext, lastMsg.id, false, { maxOutputTokens: 60, tokenTarget: 40 }, currentContent); };
   const handleManualPing = async () => { if (!state.settings.firebaseConfig?.apiKey) { alert("Firebase credentials not configured."); return; } const toolsSettings = await fetchSettings('tools'); const topic = toolsSettings?.ntfy?.topic || state.deepLogic.secrets.ntfyTopic; const baseUrl = toolsSettings?.ntfy?.baseUrl || 'https://ntfy.sh'; if (!topic) { alert("NTFY Topic not configured."); return; } const prompt = `You are ${activeChar.name}. Write a short notification ping. Tone: ${state.moodState.currentMood}.`; let generatedText = ""; try { await streamGeminiResponse([{ id: 'sys', role: 'user', content: prompt, versions: [], activeVersionIndex: 0, timestamp: Date.now() }], { id: 'void', name: 'Void', description: 'System Context', backgroundImage: '' }, state.settings, activeChar, state.moodState, (chunk) => { generatedText += chunk; }); } catch (e) { generatedText = "Ysaraith is present."; } try { await fetch(`${baseUrl}/${topic}`, { method: 'POST', body: generatedText, headers: { 'Title': `${activeChar.name}: Manual Ping` } }); alert(`Ping sent: "${generatedText}"`); } catch (e) { console.error(e); alert("Failed to send NTFY ping."); } };
 
-  // Use Optional Chaining for Style Variables to prevent crash if theme is somehow missing
+  // Theme Styles
   const styleVars = {
       '--active-accent': activeChar.theme?.accentColor || '#d4af37',
       '--active-bg': activeChar.theme?.backgroundColor || '#0d1117',
@@ -685,6 +539,15 @@ const App: React.FC = () => {
   return (
     <div className="flex h-[100dvh] w-full bg-cerberus-void text-gray-200 overflow-hidden font-sans" style={styleVars}>
       
+      {showExitToast && (
+          <div className="fixed bottom-20 left-1/2 transform -translate-x-1/2 z-[200] animate-fadeIn">
+              <div className="bg-cerberus-900/90 border border-cerberus-700 text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-2 backdrop-blur-md">
+                  <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"/>
+                  <span className="text-xs font-bold uppercase tracking-widest">Press Back Again to Exit</span>
+              </div>
+          </div>
+      )}
+
       {keyManagerMode && (
           <KeyManager 
             mode={keyManagerMode} 
@@ -692,11 +555,25 @@ const App: React.FC = () => {
           />
       )}
 
-      <Sidebar threads={getCharacterThreads()} activeThreadId={state.activeThreadId} onSelectThread={(id) => setState(prev => ({ ...prev, activeThreadId: id }))} onCreateThread={handleCreateThread} onDeleteThread={handleDeleteThread} onOpenSettings={() => setSettingsModalState({isOpen: true, initialTab: 'api'})} isOpen={isSidebarOpen} onClose={() => setSidebarOpen(false)} onExport={handleExport} onOpenScriptorium={() => setState(prev => ({ ...prev, isScriptoriumOpen: true }))} onOpenDungeon={() => setState(prev => ({ ...prev, isDungeonOpen: true }))} onOpenTower={() => setState(prev => ({ ...prev, isTowerOpen: true }))} onOpenCharacters={() => setIsGalleryOpen(true)} />
-      <ChatArea isSidebarOpen={isSidebarOpen} messages={getActiveThread().messages} oocMessages={getActiveThread().oocMessages} isStreaming={isStreaming} enterToSend={state.settings.enterToSend} onSendMessage={handleSendMessage} onSendOOC={handleSendOOC} onStopGeneration={handleStopGeneration} onRegenerate={handleRegenerate} onReiterate={handleReiterate} onDeleteMessage={handleDeleteMessage} onVersionChange={handleVersionChange} onEditMessage={handleEditUserMessage} onContinueGeneration={handleContinueGeneration} onSidebarToggle={() => setSidebarOpen(!isSidebarOpen)} onDeepLogicOpen={() => setSettingsModalState({isOpen: true, initialTab: 'deeplogic'})} onWardrobeOpen={() => setWardrobeOpen(true)} character={activeChar} portraitScale={state.settings.portraitScale} portraitAspectRatio={state.settings.portraitAspectRatio} activeRoom={getActiveRoom()} rooms={state.rooms} onRoomChange={(roomId) => setState(prev => ({ ...prev, activeRoomId: roomId }))} moodState={state.moodState} agentMode={state.agentMode} currentPortraitUrl={getCurrentPortraitUrl()} apiKeyOpenAI={state.settings.apiKeyOpenAI} apiKeyGemini={state.settings.apiKeyGemini} vttMode={state.settings.vttMode} vttAutoSend={state.settings.vttAutoSend} transcriptionModel={state.settings.transcriptionModel} bgBrightness={state.settings.bgBrightness} aiTextFontUrl={state.settings.aiTextFontUrl} aiTextColor={state.settings.aiTextColor} aiTextStyle={state.settings.aiTextStyle} aiTextSize={state.settings.aiTextSize} userTextFontUrl={state.settings.userTextFontUrl} userTextColor={state.settings.userTextColor} userTextSize={state.settings.userTextSize} hasUnreadOOC={state.hasUnreadOOC} oocAssistEnabled={state.settings.oocAssistEnabled} oocProactivity={state.settings.oocProactivity} oocStyle={state.settings.oocStyle} oocVerboseMode={state.settings.oocVerboseMode || 2} onUpdateOOCSettings={handleUpdateOOCSettings} onClearOOC={handleClearOOC} onDeleteOOC={handleDeleteOOC} onMarkOOCRead={() => setState(prev => ({...prev, hasUnreadOOC: false}))} />
+      <Sidebar 
+        threads={getCharacterThreads()} 
+        activeThreadId={state.activeThreadId} 
+        onSelectThread={(id) => setState(prev => ({ ...prev, activeThreadId: id }))} 
+        onCreateThread={handleCreateThread} 
+        onDeleteThread={handleDeleteThread} 
+        onOpenSettings={() => { pushUIState(); setSettingsModalState({isOpen: true, initialTab: 'api'}); }} 
+        isOpen={isSidebarOpen} 
+        onClose={() => setSidebarOpen(false)} 
+        onExport={handleExport} 
+        onOpenScriptorium={() => { pushUIState(); setState(prev => ({ ...prev, isScriptoriumOpen: true })); }} 
+        onOpenDungeon={() => { pushUIState(); setState(prev => ({ ...prev, isDungeonOpen: true })); }} 
+        onOpenTower={() => { pushUIState(); setState(prev => ({ ...prev, isTowerOpen: true })); }} 
+        onOpenCharacters={() => { pushUIState(); setIsGalleryOpen(true); }} 
+      />
+      <ChatArea isSidebarOpen={isSidebarOpen} messages={getActiveThread().messages} oocMessages={getActiveThread().oocMessages} isStreaming={isStreaming} enterToSend={state.settings.enterToSend} onSendMessage={handleSendMessage} onSendOOC={handleSendOOC} onStopGeneration={handleStopGeneration} onRegenerate={handleRegenerate} onReiterate={handleReiterate} onDeleteMessage={handleDeleteMessage} onVersionChange={handleVersionChange} onEditMessage={handleEditUserMessage} onContinueGeneration={handleContinueGeneration} onSidebarToggle={() => { if(!isSidebarOpen) pushUIState(); setSidebarOpen(!isSidebarOpen); }} onDeepLogicOpen={() => { pushUIState(); setSettingsModalState({isOpen: true, initialTab: 'deeplogic'}); }} onWardrobeOpen={() => { pushUIState(); setWardrobeOpen(true); }} character={activeChar} portraitScale={state.settings.portraitScale} portraitAspectRatio={state.settings.portraitAspectRatio} activeRoom={getActiveRoom()} rooms={state.rooms} onRoomChange={(roomId) => setState(prev => ({ ...prev, activeRoomId: roomId }))} moodState={state.moodState} agentMode={state.agentMode} currentPortraitUrl={getCurrentPortraitUrl()} apiKeyOpenAI={state.settings.apiKeyOpenAI} apiKeyGemini={state.settings.apiKeyGemini} vttMode={state.settings.vttMode} vttAutoSend={state.settings.vttAutoSend} transcriptionModel={state.settings.transcriptionModel} bgBrightness={state.settings.bgBrightness} aiTextFontUrl={state.settings.aiTextFontUrl} aiTextColor={state.settings.aiTextColor} aiTextStyle={state.settings.aiTextStyle} aiTextSize={state.settings.aiTextSize} userTextFontUrl={state.settings.userTextFontUrl} userTextColor={state.settings.userTextColor} userTextSize={state.settings.userTextSize} hasUnreadOOC={state.hasUnreadOOC} oocAssistEnabled={state.settings.oocAssistEnabled} oocProactivity={state.settings.oocProactivity} oocStyle={state.settings.oocStyle} oocVerboseMode={state.settings.oocVerboseMode || 2} onUpdateOOCSettings={handleUpdateOOCSettings} onClearOOC={handleClearOOC} onDeleteOOC={handleDeleteOOC} onMarkOOCRead={() => setState(prev => ({...prev, hasUnreadOOC: false}))} magicInputSettings={state.settings.magicInput} traceLogs={state.traceLogs} activeThread={getActiveThread()} />
       
       {state.isScriptoriumOpen && (
-        <ScriptoriumOverlay isOpen={state.isScriptoriumOpen} onClose={() => setState(prev => ({ ...prev, isScriptoriumOpen: false }))} messages={getScriptoriumThread().messages} config={state.scriptoriumConfig} isStreaming={isStreaming} onSendMessage={handleSendMessageScriptorium} onUpdateConfig={(newConfig) => setState(prev => ({ ...prev, scriptoriumConfig: newConfig }))} onClearMessages={() => updateThreadMessages(SCRIPTORIUM_THREAD_ID, [])} onStopGeneration={handleStopGeneration} enterToSend={state.settings.enterToSend} onManualPing={handleManualPing} apiKeyOpenAI={state.settings.apiKeyOpenAI} apiKeyGemini={state.settings.apiKeyGemini} vttMode={state.settings.vttMode} vttAutoSend={state.settings.vttAutoSend} transcriptionModel={state.settings.transcriptionModel} />
+        <ScriptoriumOverlay isOpen={state.isScriptoriumOpen} onClose={() => setState(prev => ({ ...prev, isScriptoriumOpen: false }))} config={state.scriptoriumConfig} isStreaming={isStreaming} onSendMessage={handleSendMessageScriptorium} onUpdateConfig={(newConfig) => setState(prev => ({ ...prev, scriptoriumConfig: newConfig }))} onClearMessages={() => updateThreadMessages(SCRIPTORIUM_THREAD_ID, [])} onStopGeneration={handleStopGeneration} enterToSend={state.settings.enterToSend} onManualPing={handleManualPing} apiKeyOpenAI={state.settings.apiKeyOpenAI} apiKeyGemini={state.settings.apiKeyGemini} vttMode={state.settings.vttMode} vttAutoSend={state.settings.vttAutoSend} transcriptionModel={state.settings.transcriptionModel} messages={getScriptoriumThread().messages}/>
       )}
       
       {state.isDungeonOpen && (
@@ -707,12 +584,78 @@ const App: React.FC = () => {
         <TowerOfMirrors isOpen={state.isTowerOpen} onClose={() => setState(prev => ({ ...prev, isTowerOpen: false }))} settings={state.settings} onUpdateSettings={(newSettings) => setState(prev => ({ ...prev, settings: { ...prev.settings, ...newSettings } }))} character={activeChar} />
       )}
       
+      {/* --- NEW MODALS --- */}
+      {viewingCharacter && (
+          <CharacterSheetModal 
+            character={viewingCharacter} 
+            onClose={() => setViewingCharacter(null)} 
+            onCustomize={() => {
+                handleUseTemplate(viewingCharacter);
+                setViewingCharacter(null);
+            }}
+          />
+      )}
+
+      {editingCharacter && (
+          <CharacterEditorModal 
+            character={editingCharacter}
+            isOpen={true}
+            onClose={() => setEditingCharacter(null)}
+            onSave={handleUpdateCharacter}
+            appSettings={state.settings} 
+            onCreateReportThread={(content, context) => {
+                const newThreadId = uuidv4();
+                const newThread: Thread = { 
+                    id: newThreadId, 
+                    characterId: state.activeCharacterId, 
+                    type: 'report', 
+                    title: `AI Report: ${context}`, 
+                    messages: [{
+                        id: uuidv4(),
+                        role: 'model',
+                        content: content,
+                        versions: [content],
+                        activeVersionIndex: 0,
+                        timestamp: Date.now(),
+                        speaker: 'System'
+                    }], 
+                    oocMessages: [], 
+                    lastUpdated: Date.now() 
+                };
+                setState(prev => ({ ...prev, threads: [newThread, ...prev.threads], activeThreadId: newThreadId }));
+                setEditingCharacter(null);
+            }}
+          />
+      )}
+
       {settingsModalState.isOpen && (
-        <SettingsModal isOpen={settingsModalState.isOpen} onClose={() => setSettingsModalState({isOpen: false})} initialTab={settingsModalState.initialTab} settings={state.settings} character={activeChar} rooms={state.rooms} scriptoriumConfig={state.scriptoriumConfig} deepLogicConfig={state.deepLogic} onSave={(newSettings, newChar, newRooms, newScriptorium, newDeepLogic) => setState(prev => ({ ...prev, settings: newSettings, characters: prev.characters.map(c => c.id === activeChar.id ? newChar : c), rooms: newRooms || prev.rooms, scriptoriumConfig: newScriptorium || prev.scriptoriumConfig, deepLogic: newDeepLogic || prev.deepLogic }))} onRestore={(newState) => setState(newState)} onExportTxt={handleExportTxt} />
+        <SettingsModal 
+            isOpen={settingsModalState.isOpen} 
+            onClose={() => setSettingsModalState({isOpen: false})} 
+            settings={state.settings} 
+            onUpdateSettings={(newSettings) => setState(prev => ({ ...prev, settings: {...prev.settings, ...newSettings} }))} 
+            setIsKeyManagerOpen={() => setKeyManagerMode('settings')} 
+            deepLogic={state.deepLogic}
+            onUpdateDeepLogic={(newDL) => setState(prev => ({ ...prev, deepLogic: { ...prev.deepLogic, ...newDL } }))}
+        />
       )}
       
       <WardrobeDrawer isOpen={isWardrobeOpen} onClose={() => setWardrobeOpen(false)} outfits={state.outfits} currentOutfitId={state.currentOutfitId} onSelectOutfit={(id) => setState(prev => ({ ...prev, currentOutfitId: id }))} onUpdateOutfit={(updated) => setState(prev => ({ ...prev, outfits: prev.outfits.map(o => o.id === updated.id ? updated : o) }))} onCreateOutfit={(newOutfit) => setState(prev => ({ ...prev, outfits: [...prev.outfits, newOutfit] }))} />
-      <CharacterGallery isOpen={isGalleryOpen} onClose={() => setIsGalleryOpen(false)} templates={DEFAULT_TEMPLATES} userCharacters={state.characters} activeCharacterId={state.activeCharacterId} onSelectCharacter={handleSelectCharacter} onUseTemplate={handleUseTemplate} />
+      
+      <CharacterGallery 
+        isOpen={isGalleryOpen} 
+        onClose={() => setIsGalleryOpen(false)} 
+        templates={TEMPLATES} 
+        userCharacters={state.characters} 
+        activeCharacterId={state.activeCharacterId} 
+        threads={state.threads} 
+        onSelectCharacter={handleSelectCharacter} 
+        onUseTemplate={handleUseTemplate} 
+        onEditCharacter={(c) => { pushUIState(); setEditingCharacter(c); }}
+        onDeleteCharacter={handleDeleteCharacter}
+        onViewDetails={(c) => { pushUIState(); setViewingCharacter(c); }}
+        onDuplicateCharacter={handleDuplicateCharacter}
+      />
     </div>
   );
 };

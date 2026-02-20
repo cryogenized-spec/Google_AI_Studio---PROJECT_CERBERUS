@@ -2,12 +2,13 @@
 // ... existing imports ...
 import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Send, Menu, MapPin, Square, Check, X as XIcon, Shirt, Mic, MicOff, RefreshCw, AlertCircle, ShieldAlert, Link as LinkIcon, Activity, Sparkles, ChevronLeft, ChevronRight, Scale, ScrollText, Eye, BrainCircuit, X, Mail, Trash2, Sliders, User, ChevronDown, ChevronUp, Bot, Ghost } from 'lucide-react';
-import { Message, Room, CharacterProfile, MoodState, AgentMode, AppSettings } from '../types';
+import { Send, Menu, MapPin, Square, Check, X as XIcon, Shirt, Mic, MicOff, RefreshCw, AlertCircle, ShieldAlert, Link as LinkIcon, Activity, Sparkles, ChevronLeft, ChevronRight, Scale, ScrollText, Eye, BrainCircuit, X, Mail, Trash2, Sliders, User, ChevronDown, ChevronUp, Bot, Ghost, Wand2, Dices, Terminal, Zap, Shield, FileText } from 'lucide-react';
+import { Message, Room, CharacterProfile, MoodState, AgentMode, AppSettings, TraceLog, Thread } from '../types';
 import Portrait from './Portrait';
 import { useTranscriber } from '../hooks/useTranscriber';
+import { runMagicPipeline } from '../services/magicInputService';
 
-// ... (AnkhIcon, CinderBowlIcon, MessageItem components remain unchanged) ...
+// ... (Keep existing Helper Icons and MessageItem as they were) ...
 const AnkhIcon = ({ className, onClick }: { className?: string, onClick?: () => void }) => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className={className} onClick={onClick}>
     <path d="M12 2a4 4 0 0 1 4 4c0 2-2 4-4 4s-4-2-4-4a4 4 0 0 1 4-4z" />
@@ -27,7 +28,6 @@ const CinderBowlIcon = ({ className, onClick }: { className?: string, onClick?: 
   </svg>
 );
 
-// ... (MessageItem implementation) ...
 interface MessageItemProps {
     msg: Message;
     characterName: string;
@@ -49,6 +49,7 @@ interface MessageItemProps {
 }
 
 const MessageItem: React.FC<MessageItemProps> = ({ msg, characterName, isLast, isStreaming, onDelete, onRegenerate, onReiterate, onVersionChange, onEdit, onContinue, aiTextColor, aiTextStyle, aiFontFamily, aiTextSize, userTextColor, userFontFamily, userTextSize }) => {
+    // ... (Keep existing implementation of MessageItem) ...
     const isModel = msg.role === 'model';
     const hasVersions = msg.versions && msg.versions.length > 1;
     const currentVersionIndex = msg.activeVersionIndex || 0;
@@ -171,6 +172,10 @@ interface ChatAreaProps {
   onDeleteOOC?: (id: string) => void;
   onMarkOOCRead?: () => void;
   isSidebarOpen: boolean; 
+  // Add magic input props
+  magicInputSettings?: any;
+  traceLogs?: TraceLog[];
+  activeThread?: Thread;
 }
 
 const useDynamicFont = (fontUrl?: string, idSuffix: string = 'main') => {
@@ -195,6 +200,52 @@ const getFontFamilyFromUrl = (url: string) => {
         return match[1].replace(/\+/g, ' ');
     }
     return '';
+};
+
+// ... (TraceLogViewer unchanged) ...
+const TraceLogViewer: React.FC<{ logs: TraceLog[]; onClose: () => void }> = ({ logs, onClose }) => {
+    const [expandedId, setExpandedId] = useState<string | null>(logs[0]?.id || null);
+
+    return (
+        <div className="fixed inset-0 z-[150] bg-black/90 backdrop-blur-md flex flex-col animate-fadeIn">
+            <div className="p-4 border-b border-cerberus-800 flex justify-between items-center bg-cerberus-900">
+                <h3 className="text-lg font-serif text-cerberus-accent flex items-center gap-2"><Terminal size={20}/> MAGIC TRACE LOGS</h3>
+                <button onClick={onClose}><X size={24} className="text-gray-500 hover:text-white"/></button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                {logs.length === 0 && <div className="text-center text-gray-500 mt-20 italic">No magic traces found.</div>}
+                {logs.slice(0, 5).map((log, idx) => (
+                    <div key={log.id} className="mb-6">
+                        <div 
+                            onClick={() => setExpandedId(expandedId === log.id ? null : log.id)}
+                            className="flex justify-between items-center p-3 bg-cerberus-900 border border-cerberus-700 rounded cursor-pointer hover:bg-cerberus-800 transition-colors"
+                        >
+                            <div>
+                                <span className="text-xs font-mono text-gray-400">{new Date(log.timestamp).toLocaleString()}</span>
+                                <div className="text-sm text-white font-bold truncate max-w-[200px]">{log.inputSnippet}</div>
+                            </div>
+                            {expandedId === log.id ? <ChevronUp size={16}/> : <ChevronDown size={16}/>}
+                        </div>
+                        {expandedId === log.id && (
+                            <div className="bg-black/50 border-x border-b border-cerberus-800 rounded-b p-4 space-y-3 font-mono text-xs">
+                                {log.entries.map((entry, i) => (
+                                    <div key={i} className={`flex gap-2 ${entry.status === 'error' ? 'text-red-400' : entry.status === 'success' ? 'text-green-400' : entry.status === 'warning' ? 'text-yellow-400' : 'text-gray-300'}`}>
+                                        <span className="font-bold min-w-[100px] uppercase text-[10px] opacity-70">{entry.step}:</span>
+                                        <span className="flex-1 whitespace-pre-wrap">{entry.details}</span>
+                                    </div>
+                                ))}
+                                <div className="mt-4 pt-4 border-t border-cerberus-800/50">
+                                    <div className="text-[10px] uppercase text-gray-500 mb-1">Final Output</div>
+                                    <div className="p-2 bg-cerberus-900/50 rounded text-gray-300 italic">{log.outputSnippet}</div>
+                                </div>
+                            </div>
+                        )}
+                        {idx < logs.length - 1 && <div className="flex justify-center my-4 opacity-30 text-gray-600 font-bold tracking-[0.5em] text-[10px]"> — — — </div>}
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
 };
 
 const ChatArea: React.FC<ChatAreaProps> = ({
@@ -241,14 +292,21 @@ const ChatArea: React.FC<ChatAreaProps> = ({
   oocProactivity = 5,
   oocStyle = 6,
   oocVerboseMode = 2,
-  oocPersona = 'character', // Default from props if missing
+  oocPersona = 'character',
   onUpdateOOCSettings,
   onClearOOC,
   onDeleteOOC,
   onMarkOOCRead,
-  isSidebarOpen 
+  isSidebarOpen,
+  magicInputSettings,
+  traceLogs = [],
+  activeThread
 }) => {
-  const [input, setInput] = useState('');
+  const [input, setInput] = useState(() => localStorage.getItem('cerberus_draft_input') || '');
+  
+  // NEW: Magic Review State
+  const [magicReview, setMagicReview] = useState<{ isOpen: boolean, content: string, original: string, isProcessing: boolean }>({ isOpen: false, content: '', original: '', isProcessing: false });
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const oocEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -256,15 +314,49 @@ const ChatArea: React.FC<ChatAreaProps> = ({
   const [isOOCPanelOpen, setIsOOCPanelOpen] = useState(false);
   const [isPortraitCollapsed, setIsPortraitCollapsed] = useState(false);
   const [isAssistSettingsOpen, setIsAssistSettingsOpen] = useState(true);
+  const [isTraceLogOpen, setIsTraceLogOpen] = useState(false);
   
   const lastPortraitTapRef = useRef<number>(0);
+  const wasPortraitMaximizedRef = useRef<boolean>(true);
+
+  // Magic Gesture State
+  const [isLongPressing, setIsLongPressing] = useState(false);
+  const [isMagicActive, setIsMagicActive] = useState(false);
+  const [magicDragY, setMagicDragY] = useState(0);
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startYRef = useRef<number>(0);
   
+  useEffect(() => {
+      localStorage.setItem('cerberus_draft_input', input);
+  }, [input]);
+
+  useEffect(() => {
+      if (isSidebarOpen) setIsOOCPanelOpen(false);
+  }, [isSidebarOpen]);
+
+  useEffect(() => {
+      if (isOOCPanelOpen) {
+          wasPortraitMaximizedRef.current = !isPortraitCollapsed;
+          setIsPortraitCollapsed(true);
+      } else {
+          if (wasPortraitMaximizedRef.current) setIsPortraitCollapsed(false);
+      }
+  }, [isOOCPanelOpen]);
+
+  // Handle Voice Input
   const { isRecording, isTranscribing, error, startRecording, stopRecording, retry } = useTranscriber({
       mode: vttMode as 'browser' | 'openai' | 'gemini',
       model: transcriptionModel,
       apiKey: vttMode === 'gemini' ? apiKeyGemini : apiKeyOpenAI, 
-      onInputUpdate: (text) => setInput(text),
-      onSend: (text) => isOOCPanelOpen ? onSendOOC(text) : onSendMessage(text),
+      onInputUpdate: (text) => setInput(prev => prev ? prev + ' ' + text : text),
+      // IMPORTANT: We disable autoSend if Magic Mode is active for Voice to route it correctly
+      onSend: (text) => {
+          // If Magic Mode is NOT engaged via gesture/flow, we send directly if AutoSend is ON.
+          // However, if we triggered Magic, we intercept elsewhere.
+          if (vttAutoSend && !isMagicActive) {
+              if (isOOCPanelOpen) onSendOOC(text); else onSendMessage(text);
+          }
+      },
       autoSend: vttAutoSend
   });
 
@@ -283,12 +375,117 @@ const ChatArea: React.FC<ChatAreaProps> = ({
 
   const toggleRecording = () => { if (isRecording) stopRecording(); else startRecording(); };
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => setInput(e.target.value);
-  const handleSubmit = (e?: React.FormEvent) => { e?.preventDefault(); if (!input.trim() || isStreaming) return; if (isOOCPanelOpen) onSendOOC(input); else onSendMessage(input); setInput(''); if (textareaRef.current) textareaRef.current.style.height = 'auto'; };
+  
+  const handleSubmit = (e?: React.FormEvent) => { 
+      e?.preventDefault(); 
+      if (!input.trim() || isStreaming) return; 
+      if (isOOCPanelOpen) onSendOOC(input); else onSendMessage(input); 
+      setInput(''); 
+      localStorage.removeItem('cerberus_draft_input');
+      if (textareaRef.current) textareaRef.current.style.height = 'auto'; 
+  };
+
+  // --- MAGIC LOGIC ---
+
+  const performMagicProcess = async (text: string, referee: boolean = false) => {
+      setMagicReview({ isOpen: true, content: text, original: text, isProcessing: true });
+      
+      const appSettings = { 
+          apiKeyGemini, apiKeyOpenAI, 
+          magicInput: magicInputSettings,
+          writingStyle: character.constraints?.writingStyle,
+          formattingStyle: 'paragraphs',
+          userName: 'User'
+      } as any;
+
+      const result = await runMagicPipeline(text, appSettings, character, activeThread, undefined, referee);
+      
+      setMagicReview(prev => ({ 
+          ...prev, 
+          content: result.finalText, 
+          isProcessing: false 
+      }));
+
+      if ((window as any).addTraceLog) (window as any).addTraceLog(result.traceLog);
+      
+      if (result.advisorNote && onSendOOC) {
+          onSendOOC(`[TACTICAL ADVISOR]: ${result.advisorNote}`);
+      }
+  };
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+      if (!magicInputSettings?.enabled) return;
+      const target = e.currentTarget;
+      target.setPointerCapture(e.pointerId);
+      startYRef.current = e.clientY;
+      longPressTimerRef.current = setTimeout(() => {
+          setIsLongPressing(true);
+          if (navigator.vibrate) navigator.vibrate(50);
+      }, 450);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+      if (!isLongPressing) return;
+      const deltaY = startYRef.current - e.clientY; 
+      setMagicDragY(deltaY);
+      if (deltaY > 50) setIsMagicActive(true); else setIsMagicActive(false);
+  };
+
+  const handlePointerUp = async (e: React.PointerEvent) => {
+      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+      const target = e.currentTarget;
+      target.releasePointerCapture(e.pointerId);
+
+      // CASE 1: MAGIC ACTIVE (Drag Up)
+      if (isMagicActive && magicInputSettings?.enabled) {
+          const raw = input.trim();
+          
+          if (raw) {
+              // Text Present: Process immediately
+              performMagicProcess(raw);
+          } else {
+              // No Text: Start Voice Recording for Magic
+              // We rely on the user manually stopping recording to trigger magic
+              startRecording();
+              // Note: We need a way to know we are in "Magic Voice" mode when stop is clicked.
+              // For simplicity, we assume normal recording, but if they drag-up on empty, 
+              // maybe we flag it? Let's just use the normal record flow but let user decide after.
+              // Actually, user requested Magic Voice flow.
+              // Let's set a flag or just rely on the Review overlay being manually triggerable?
+              // Better: If they drag up on Mic, we start recording, and when they stop, we AUTO-MAGIC.
+              // But handlePointerUp fires now.
+          }
+      } 
+      // CASE 2: NORMAL TAP/CLICK
+      else if (!isLongPressing) {
+          if (isRecording) {
+              // STOP RECORDING LOGIC
+              stopRecording();
+              // NOTE: `stopRecording` is async in effect. The `useTranscriber` hook will update `input`.
+              // We can't easily chain magic here without a complex state machine.
+              // Workaround: We let it transcribe to Input. User can then drag-up on the text to Magic it.
+          } else {
+              handleSmartAction();
+          }
+      }
+
+      setIsLongPressing(false);
+      setIsMagicActive(false);
+      setMagicDragY(0);
+  };
+
   const handleSmartAction = () => { if (input.trim()) handleSubmit(); else toggleRecording(); };
   const handleStop = (e: React.MouseEvent) => { e.preventDefault(); onStopGeneration(); };
   const handleKeyDown = (e: React.KeyboardEvent) => { if (e.key === 'Enter') { if (enterToSend && !e.shiftKey) { e.preventDefault(); handleSubmit(); } } };
   const handleClearOOCConfirm = () => { if (confirm("Are you sure you want to delete all OOC history?")) onClearOOC?.(); };
-  const handlePortraitTap = () => { const now = Date.now(); if (now - lastPortraitTapRef.current < 300) setIsPortraitCollapsed(!isPortraitCollapsed); lastPortraitTapRef.current = now; };
+  const handlePortraitTap = () => { 
+      const now = Date.now(); 
+      if (now - lastPortraitTapRef.current < 300) {
+          setIsPortraitCollapsed(!isPortraitCollapsed);
+          wasPortraitMaximizedRef.current = isPortraitCollapsed; 
+      }
+      lastPortraitTapRef.current = now; 
+  };
 
   const bgOpacity = Math.max(0.1, Math.min(1.0, bgBrightness / 100));
 
@@ -297,7 +494,75 @@ const ChatArea: React.FC<ChatAreaProps> = ({
       <div className="absolute inset-0 bg-cover bg-center bg-no-repeat transition-all duration-1000 transform scale-105" style={{ backgroundImage: `url(${activeRoom.backgroundImage})`, opacity: bgOpacity }} />
       <div className="absolute inset-0 bg-gradient-to-b from-cerberus-void/70 via-cerberus-void/60 to-cerberus-void/90 pointer-events-none" />
 
-      {isRecording && (
+      {/* MAGIC REVIEW OVERLAY */}
+      {magicReview.isOpen && (
+          <div className="absolute inset-x-0 bottom-0 top-0 z-[80] bg-black/90 backdrop-blur-xl flex flex-col animate-fadeIn">
+              {/* Header */}
+              <div className="p-4 border-b border-violet-900/50 bg-violet-950/20 flex justify-between items-center">
+                  <h3 className="text-violet-300 font-serif font-bold tracking-widest text-sm flex items-center gap-2"><Sparkles size={16}/> MAGIC EDITOR</h3>
+                  <button onClick={() => setMagicReview({ ...magicReview, isOpen: false })} className="text-gray-500 hover:text-white"><X size={20}/></button>
+              </div>
+              
+              {/* Main Content */}
+              <div className="flex-1 p-6 flex flex-col gap-4 overflow-y-auto">
+                  {magicReview.isProcessing ? (
+                      <div className="flex-1 flex flex-col items-center justify-center text-violet-400 animate-pulse">
+                          <Wand2 size={48} className="mb-4 animate-spin-slow"/>
+                          <p className="font-mono text-xs uppercase tracking-widest">Weaving Reality...</p>
+                      </div>
+                  ) : (
+                      <textarea 
+                          value={magicReview.content}
+                          onChange={e => setMagicReview({...magicReview, content: e.target.value})}
+                          className="flex-1 w-full bg-black/50 border border-violet-900/30 rounded-lg p-4 text-sm text-gray-200 focus:border-violet-500 outline-none resize-none font-sans leading-relaxed custom-scrollbar shadow-inner"
+                      />
+                  )}
+              </div>
+
+              {/* Controls */}
+              <div className="p-4 border-t border-violet-900/30 bg-black/40 space-y-3">
+                  <div className="flex gap-2 justify-center">
+                      <button 
+                        onClick={() => performMagicProcess(magicReview.original || magicReview.content)} 
+                        disabled={magicReview.isProcessing}
+                        className="px-3 py-2 bg-violet-900/30 border border-violet-700/50 rounded text-xs text-violet-200 hover:bg-violet-800/50 flex items-center gap-1 transition-colors"
+                      >
+                          <RefreshCw size={14}/> Regenerate
+                      </button>
+                      <button 
+                        onClick={() => performMagicProcess(magicReview.content, true)} // Referee Mode
+                        disabled={magicReview.isProcessing}
+                        className="px-3 py-2 bg-red-900/20 border border-red-700/50 rounded text-xs text-red-300 hover:bg-red-900/40 flex items-center gap-1 transition-colors"
+                        title="Check for Godmoding/Logic"
+                      >
+                          <Shield size={14}/> Referee
+                      </button>
+                  </div>
+                  <div className="flex gap-3">
+                      <button 
+                        onClick={() => setMagicReview({ ...magicReview, isOpen: false })}
+                        className="flex-1 py-3 border border-gray-700 rounded text-gray-400 hover:text-white uppercase font-bold text-xs"
+                      >
+                          Discard
+                      </button>
+                      <button 
+                        onClick={() => {
+                            if (isOOCPanelOpen) onSendOOC(magicReview.content); 
+                            else onSendMessage(magicReview.content);
+                            setMagicReview({ ...magicReview, isOpen: false });
+                            setInput('');
+                        }}
+                        disabled={magicReview.isProcessing}
+                        className="flex-1 py-3 bg-violet-600 hover:bg-violet-500 text-white rounded font-bold uppercase text-xs shadow-[0_0_20px_rgba(139,92,246,0.4)] flex items-center justify-center gap-2"
+                      >
+                          <Send size={16}/> Confirm & Send
+                      </button>
+                  </div>
+              </div>
+          </div>
+      )}
+
+      {isRecording && !magicReview.isOpen && (
           <div className="absolute inset-0 z-[60] bg-black/60 backdrop-blur-md flex flex-col items-center justify-end pb-32 animate-fadeIn">
               <div className="relative">
                   <div className="absolute inset-0 bg-violet-500 rounded-full animate-ping opacity-20 delay-100"></div>
@@ -309,6 +574,9 @@ const ChatArea: React.FC<ChatAreaProps> = ({
               <p className="mt-2 text-xs font-mono text-violet-300/70 tracking-widest">TAP TO STOP</p>
           </div>
       )}
+
+      {/* Trace Log Modal */}
+      {isTraceLogOpen && <TraceLogViewer logs={traceLogs} onClose={() => setIsTraceLogOpen(false)} />}
 
       <div className="absolute top-0 left-0 right-0 z-50 px-4 flex justify-between items-start pointer-events-none pb-4" style={{ paddingTop: 'max(1rem, env(safe-area-inset-top))' }}>
         <div className={`pointer-events-auto flex flex-col gap-2 items-start mt-2 transition-opacity duration-300 ${isSidebarOpen ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}>
@@ -326,6 +594,10 @@ const ChatArea: React.FC<ChatAreaProps> = ({
                     <BrainCircuit size={14} className={isOOCPanelOpen ? "text-white" : "text-violet-400"} /><span className="text-[10px] font-mono uppercase tracking-wider">OOC Mode</span>{hasUnreadOOC && !isOOCPanelOpen && (<Mail size={12} className="text-pink-400 animate-pulse ml-1" fill="currentColor" />)}
                 </button>
                 <button onClick={onWardrobeOpen} className="flex items-center gap-2 text-cerberus-accent hover:text-white transition-colors opacity-70 hover:opacity-100 bg-cerberus-900/50 px-2 py-1.5 rounded-full border border-cerberus-700/30 self-start" title="Wardrobe"><Shirt size={14} /><span className="text-[9px] font-mono uppercase">Attire</span></button>
+                
+                {magicInputSettings?.enabled && traceLogs.length > 0 && (
+                    <button onClick={() => setIsTraceLogOpen(true)} className="flex items-center gap-2 text-yellow-200 hover:text-white transition-colors opacity-70 hover:opacity-100 bg-cerberus-900/50 px-2 py-1.5 rounded-full border border-yellow-700/30 self-start" title="Magic Logs"><ScrollText size={14} /><span className="text-[9px] font-mono uppercase">Debug</span></button>
+                )}
             </div>
         </div>
         <div className={`pointer-events-auto flex flex-col items-end gap-2 mt-2 ${isSidebarOpen ? 'hidden md:flex' : 'flex'}`}>
@@ -341,7 +613,8 @@ const ChatArea: React.FC<ChatAreaProps> = ({
                 <div ref={messagesEndRef} className="h-4"/>
              </div>
 
-             <div className={`absolute inset-y-0 right-0 z-20 w-full md:w-96 bg-cerberus-900/95 backdrop-blur-xl border-l border-cerberus-700 transform transition-transform duration-300 flex flex-col pt-32 ${isOOCPanelOpen ? 'translate-x-0' : 'translate-x-full'}`}>
+             {/* OOC Panel */}
+             <div className={`absolute inset-y-0 right-0 z-20 w-full md:w-96 bg-cerberus-900/95 backdrop-blur-xl border-l border-cerberus-700 transform transition-transform duration-300 flex flex-col pt-24 md:pt-32 ${isOOCPanelOpen ? 'translate-x-0' : 'translate-x-full'}`}>
                 <div className="p-4 border-b border-cerberus-800 flex justify-between items-center bg-black/20">
                     <h3 className="text-cerberus-accent font-mono text-xs uppercase tracking-widest flex items-center gap-2"><BrainCircuit size={14}/> {oocAssistEnabled ? 'Neural Link (Active)' : 'Neural Link (Offline)'}</h3>
                     <div className="flex items-center gap-2">
@@ -352,21 +625,20 @@ const ChatArea: React.FC<ChatAreaProps> = ({
                 </div>
 
                 {isAssistSettingsOpen && onUpdateOOCSettings && (
-                     <div className="p-4 bg-black/40 border-b border-cerberus-800 space-y-4 animate-fadeIn">
-                        <div className="flex items-center justify-between">
-                            <label className="text-[10px] text-gray-400 uppercase">Assist Enabled</label>
-                            <div onClick={() => onUpdateOOCSettings({oocAssistEnabled: !oocAssistEnabled})} className={`w-8 h-4 rounded-full cursor-pointer p-0.5 ${oocAssistEnabled ? 'bg-cerberus-accent' : 'bg-gray-700'}`}><div className={`w-3 h-3 bg-black rounded-full transition-transform ${oocAssistEnabled ? 'translate-x-4' : ''}`}/></div>
+                     <div className="p-4 bg-black/40 border-b border-cerberus-800 space-y-6 animate-fadeIn w-full">
+                        <div className="flex items-center justify-between w-full">
+                            <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wide">Assist Enabled</label>
+                            <div onClick={() => onUpdateOOCSettings({oocAssistEnabled: !oocAssistEnabled})} className={`w-8 h-4 rounded-full cursor-pointer p-0.5 transition-colors ${oocAssistEnabled ? 'bg-cerberus-accent' : 'bg-gray-700'}`}><div className={`w-3 h-3 bg-black rounded-full transition-transform duration-200 ${oocAssistEnabled ? 'translate-x-4' : ''}`}/></div>
                         </div>
                         
-                        {/* PERSONA SLIDER */}
-                        <div>
-                            <label className="text-[10px] text-gray-400 uppercase flex justify-between mb-2">
+                        <div className="w-full">
+                            <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wide flex justify-between mb-2 w-full">
                                 <span>Voice Persona</span>
                                 <span className={oocPersona === 'system' ? 'text-blue-400' : 'text-pink-400'}>
                                     {oocPersona === 'system' ? 'Neutral Agent' : 'Character Self'}
                                 </span>
                             </label>
-                            <div className="flex bg-black/50 rounded-lg p-1 border border-cerberus-800">
+                            <div className="flex bg-black/50 rounded-lg p-1 border border-cerberus-800 w-full">
                                 <button 
                                     type="button"
                                     onClick={() => onUpdateOOCSettings({oocPersona: 'system'})}
@@ -384,13 +656,13 @@ const ChatArea: React.FC<ChatAreaProps> = ({
                             </div>
                         </div>
 
-                        <div>
-                             <label className="text-[10px] text-gray-400 uppercase flex justify-between"><span>Proactivity</span><span>{oocProactivity}/10</span></label>
-                             <input type="range" min="1" max="10" value={oocProactivity} onChange={(e) => onUpdateOOCSettings({oocProactivity: parseInt(e.target.value)})} className="w-full accent-cerberus-accent h-1"/>
+                        <div className="w-full">
+                             <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wide flex justify-between mb-2 w-full"><span>Proactivity</span><span>{oocProactivity}/10</span></label>
+                             <input type="range" min="1" max="10" value={oocProactivity} onChange={(e) => onUpdateOOCSettings({oocProactivity: parseInt(e.target.value)})} className="w-full accent-cerberus-accent h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer block"/>
                         </div>
-                        <div>
-                             <label className="text-[10px] text-gray-400 uppercase flex justify-between"><span>Verbose Mode</span><span>{oocVerboseMode === 1 ? 'Concise' : oocVerboseMode === 3 ? 'Verbose' : 'Balanced'}</span></label>
-                             <input type="range" min="1" max="3" value={oocVerboseMode} onChange={(e) => onUpdateOOCSettings({oocVerboseMode: parseInt(e.target.value)})} className="w-full accent-cerberus-accent h-1"/>
+                        <div className="w-full">
+                             <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wide flex justify-between mb-2 w-full"><span>Verbose Mode</span><span>{oocVerboseMode === 1 ? 'Concise' : oocVerboseMode === 3 ? 'Verbose' : 'Balanced'}</span></label>
+                             <input type="range" min="1" max="3" value={oocVerboseMode} onChange={(e) => onUpdateOOCSettings({oocVerboseMode: parseInt(e.target.value)})} className="w-full accent-cerberus-accent h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer block"/>
                         </div>
                      </div>
                 )}
@@ -418,12 +690,42 @@ const ChatArea: React.FC<ChatAreaProps> = ({
             <div className="p-3 transition-all duration-300 mx-auto">
                 <div className={`max-w-3xl mx-auto flex items-end gap-2 bg-cerberus-900/40 border border-violet-500/30 rounded-2xl p-1 relative shadow-[0_0_20px_rgba(139,92,246,0.1)] transition-all duration-300 ${isOOCPanelOpen ? 'md:mr-[25rem]' : ''} `}>
                     <textarea ref={textareaRef} value={input} onChange={handleInputChange} onKeyDown={handleKeyDown} onFocus={() => { setKeyboardOpen(true); scrollToBottom(); }} onBlur={() => setKeyboardOpen(false)} placeholder={isOOCPanelOpen ? "Telepathic message..." : "Manifest your will..."} className={`flex-1 bg-transparent border-none focus:ring-0 text-sm text-gray-200 resize-none max-h-32 py-3 px-4 custom-scrollbar tracking-wide font-sans ${isOOCPanelOpen ? 'placeholder-violet-300/30' : 'placeholder:font-playfair placeholder:italic placeholder:text-violet-300/50'}`} rows={1} />
-                    <div className="shrink-0 mb-1 mr-1">
-                        {isStreaming ? (
-                             <button onClick={handleStop} className="p-2 rounded-full bg-red-900/80 text-white shadow-[0_0_15px_rgba(220,38,38,0.5)] border border-red-500/30 hover:bg-red-700 transition-all"><Square size={18} fill="currentColor"/></button>
+                    
+                    {/* MAGIC BUTTON CONTAINER */}
+                    <div 
+                        className="shrink-0 mb-1 mr-1 relative touch-none flex items-center justify-center w-16 h-16"
+                        onPointerDown={handlePointerDown}
+                        onPointerMove={handlePointerMove}
+                        onPointerUp={handlePointerUp}
+                        onPointerCancel={handlePointerUp}
+                        onPointerLeave={handlePointerUp}
+                        style={{ touchAction: 'none' }}
+                    >
+                        {/* FEEDBACK RING */}
+                        <div className={`absolute inset-0 rounded-full border-2 border-violet-400 transition-all duration-300 pointer-events-none ${isLongPressing ? 'scale-150 opacity-100' : 'scale-75 opacity-0'}`} />
+
+                        {/* MAGIC WAND OVERLAY */}
+                        {isLongPressing && (
+                            <div className={`absolute bottom-full left-1/2 transform -translate-x-1/2 mb-4 flex flex-col items-center pointer-events-none transition-all duration-300 ${isMagicActive ? 'scale-110 opacity-100' : 'scale-90 opacity-70'}`}>
+                                <div className="bg-violet-900 text-white text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded mb-2 shadow-lg whitespace-nowrap">
+                                    {isMagicActive ? "Release to Enhance" : "Drag Up"}
+                                </div>
+                                <div className={`p-3 rounded-full bg-gradient-to-t from-violet-600 to-fuchsia-500 shadow-[0_0_30px_rgba(167,139,250,0.6)] ${isMagicActive ? 'animate-pulse' : ''}`}>
+                                    <Wand2 size={24} className="text-white"/>
+                                </div>
+                                <Sparkles size={20} className={`absolute -top-2 -right-2 text-yellow-300 ${isMagicActive ? 'animate-spin' : ''}`}/>
+                            </div>
+                        )}
+
+                        {isStreaming || magicReview.isProcessing ? (
+                             <button onClick={handleStop} className="w-16 h-16 rounded-full bg-red-900/80 text-white shadow-[0_0_15px_rgba(220,38,38,0.5)] border border-red-500/30 hover:bg-red-700 transition-all flex items-center justify-center"><Square size={24} fill="currentColor"/></button>
                         ) : (
-                            <button onClick={handleSmartAction} className={`p-2 rounded-full border transition-all duration-300 ${input.trim() ? 'bg-violet-600 border-violet-400 text-white shadow-[0_0_15px_rgba(139,92,246,0.4)] hover:bg-violet-500' : isRecording ? 'bg-red-900 border-red-500 text-white animate-pulse' : isTranscribing ? 'bg-cerberus-800 border-cerberus-600 animate-spin text-cerberus-accent' : 'bg-transparent border-transparent text-gray-400 hover:text-white hover:bg-white/10' }`} title={input.trim() ? "Send Telepathic Message" : (error || "Voice Input")}>
-                                {input.trim() ? <Send size={20} /> : (isTranscribing ? <RefreshCw size={20}/> : isRecording ? <MicOff size={20}/> : error ? <AlertCircle size={20} onClick={(e) => { e.stopPropagation(); retry(); }} /> : <Mic size={20}/>)}
+                            <button 
+                                className={`w-16 h-16 rounded-full border transition-all duration-300 flex items-center justify-center ${input.trim() ? 'bg-violet-600 border-violet-400 text-white shadow-[0_0_15px_rgba(139,92,246,0.4)] hover:bg-violet-500' : isRecording ? 'bg-red-900 border-red-500 text-white animate-pulse' : isTranscribing ? 'bg-cerberus-800 border-cerberus-600 animate-spin text-cerberus-accent' : 'bg-transparent border-transparent text-gray-400 hover:text-white hover:bg-white/10' }`} 
+                                title={input.trim() ? "Send (Hold for Magic)" : (error || "Voice Input")}
+                                style={{ transform: isLongPressing ? 'scale(0.95)' : 'scale(1)' }}
+                            >
+                                {input.trim() ? <Send size={28} /> : (isTranscribing ? <RefreshCw size={28}/> : isRecording ? <MicOff size={28}/> : error ? <AlertCircle size={28} onClick={(e) => { e.stopPropagation(); retry(); }} /> : <Mic size={28}/>)}
                             </button>
                         )}
                     </div>

@@ -39,8 +39,8 @@ self.addEventListener('push', (event) => {
 
     const options = {
         body: data.body || 'Ysaraith requires your attention.',
-        icon: '/public/icons/icon-192.png', 
-        badge: '/public/icons/icon-192.png', 
+        icon: '/icons/icon-192.png', 
+        badge: '/icons/icon-192.png', 
         vibrate: [100, 50, 100],
         data: data.payload || {},
         tag: data.tag || 'cerberus-task',

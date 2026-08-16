@@ -2,9 +2,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { Message, Room, CharacterProfile, AppSettings, Thread, ChatState, MoodState, DeepLogicConfig, AgentMode, ScriptoriumConfig, DungeonConfig, Outfit, ScheduleSettings, RuntimeSettings, MemoryPolicy, ToolSettings, WakeLog, QuickPreset } from './types';
-import { DEFAULT_PROFILE, DEFAULT_ROOMS, DEFAULT_SETTINGS, DEFAULT_MOOD_STATE, DEFAULT_DEEP_LOGIC, DEFAULT_OUTFITS, DEFAULT_SCHEDULE_SETTINGS, DEFAULT_SCRIPTORIUM_CONFIG, DEFAULT_DUNGEON_CONFIG, OOC_ADVISORY_SYSTEM_PROMPT, OOC_SYSTEM_PROMPT, YSARAITH_PLAYER_PROMPT_ADDENDUM, STATIC_THREAD_ID, SCRIPTORIUM_THREAD_ID, DUNGEON_THREAD_ID, EVENT_DELTAS, STORAGE_KEY, UI_STATE_KEY } from './constants';
+import { DEFAULT_PROFILE, DEFAULT_ROOMS, DEFAULT_SETTINGS, DEFAULT_MOOD_STATE, DEFAULT_DEEP_LOGIC, DEFAULT_OUTFITS, DEFAULT_SCHEDULE_SETTINGS, DEFAULT_SCRIPTORIUM_CONFIG, DEFAULT_DUNGEON_CONFIG, OOC_ADVISORY_SYSTEM_PROMPT, OOC_SYSTEM_PROMPT, STATIC_THREAD_ID, SCRIPTORIUM_THREAD_ID, DUNGEON_THREAD_ID, EVENT_DELTAS, STORAGE_KEY, UI_STATE_KEY } from './constants';
 import { migratePersistedState, prepareStateForPersistence } from './services/stateMigration';
-import { compileCharacterSystemPrompt } from './services/promptCompiler';
+import { runGeneration, resolveGenerationMode, formatGenerationError } from './services/generationService';
 import { streamGeminiResponse } from './services/geminiService';
 import { streamGrokResponse } from './services/grokService';
 import { runWakeCycleLogic } from './services/wakeService';
@@ -55,7 +55,6 @@ const App: React.FC = () => {
 
   // --- BOOT SEQUENCE HANDOFF (CRITICAL FIX) ---
   useEffect(() => {
-    // This tells index.html that React has mounted successfully
     if ((window as any).signalAppReady) {
         setTimeout(() => { (window as any).signalAppReady(); }, 100);
     }
@@ -125,7 +124,6 @@ const App: React.FC = () => {
       const handlePopState = (event: PopStateEvent) => {
           let handled = false;
 
-          // 1. Close Modals (Deepest First)
           if (editingCharacter) { setEditingCharacter(null); handled = true; }
           else if (viewingCharacter) { setViewingCharacter(null); handled = true; }
           else if (settingsModalState.isOpen) { setSettingsModalState({ isOpen: false }); handled = true; }
@@ -139,7 +137,6 @@ const App: React.FC = () => {
           if (handled) {
               try { window.history.pushState({ ui: 'root' }, '', null); } catch(e) {}
           } else {
-              // Exit Intent
               if (!exitIntent) {
                   setExitIntent(true);
                   setShowExitToast(true);
@@ -162,7 +159,6 @@ const App: React.FC = () => {
   // --- KEY CHECK ON BOOT (Pass 1 hardened) ---
   useEffect(() => {
       const checkKeys = async () => {
-          // If keys are already in memory we are good
           if (state.settings?.apiKeyGemini || state.settings?.apiKeyGrok) return;
 
           try {
@@ -307,56 +303,122 @@ const App: React.FC = () => {
       setState(prev => ({ ...prev, characters: [...prev.characters, copy], threads: [...prev.threads, mainThread] }));
   };
 
-  const handleCreateReportThread = (initialContent: string, context: string) => {
-      const newThread: Thread = {
-          id: uuidv4(),
-          characterId: state.activeCharacterId,
-          type: 'report',
-          title: `AI Report: ${context} (${new Date().toLocaleDateString()})`,
-          messages: [{
-              id: uuidv4(),
-              role: 'model',
-              content: initialContent,
-              versions: [initialContent],
-              activeVersionIndex: 0,
-              timestamp: Date.now(),
-              speaker: 'System'
-          }],
-          oocMessages: [],
-          lastUpdated: Date.now()
-      };
-      
-      setState(prev => ({
-          ...prev,
-          threads: [newThread, ...prev.threads],
-          activeThreadId: newThread.id
-      }));
-      setEditingCharacter(null); // Close editor
-  };
-
-  // --- GENERATION HANDLERS ---
-  const performGeneration = async (messagesContext: Message[], modelMsgId: string, isRegeneration: boolean, overrideSettings?: Partial<AppSettings>, startText: string = '', targetThreadId?: string, dungeonMode?: 'dm' | 'player', injectionPrompt?: string) => {
+  // --- GENERATION HANDLERS (Pass 2 – wired through generationService) ---
+  const performGeneration = async (
+    messagesContext: Message[],
+    modelMsgId: string,
+    isRegeneration: boolean,
+    overrideSettings?: Partial<AppSettings>,
+    startText: string = '',
+    targetThreadId?: string,
+    dungeonMode?: 'dm' | 'player',
+    injectionPrompt?: string
+  ) => {
     setIsStreaming(true);
     abortControllerRef.current = new AbortController();
     let fullResponseText = startText;
-    const effectiveSettings = { ...state.settings, ...overrideSettings };
     const threadIdToUpdate = targetThreadId || state.activeThreadId;
     const targetThread = state.threads.find(t => t.id === threadIdToUpdate);
-    const isScriptoriumGen = targetThread?.type === 'scriptorium';
-    const isDungeonGen = targetThread?.type === 'dungeon';
+    const mode = resolveGenerationMode(targetThread?.type, dungeonMode);
+    const isScriptoriumGen = mode === 'scriptorium';
+    const isDungeonGen = mode === 'dungeon-dm' || mode === 'dungeon-player';
+    const currentOutfit = state.outfits.find(o => o.id === state.currentOutfitId) || null;
+
+    const onChunk = (text: string) => {
+      fullResponseText += text;
+      setState(prev => ({
+        ...prev,
+        threads: prev.threads.map(t => {
+          if (t.id !== threadIdToUpdate) return t;
+          const msgs = t.messages.map(m => {
+            if (m.id === modelMsgId) {
+              const newVersions = [...(m.versions || [''])];
+              const idx = m.activeVersionIndex ?? 0;
+              newVersions[idx] = fullResponseText;
+              return {
+                ...m,
+                versions: newVersions,
+                content: fullResponseText,
+                speaker: (isDungeonGen
+                  ? (dungeonMode === 'dm' ? 'DM' : 'Ysaraith')
+                  : undefined) as Message['speaker']
+              };
+            }
+            return m;
+          });
+          return { ...t, messages: msgs };
+        })
+      }));
+    };
 
     try {
-        const room = isScriptoriumGen ? { ...DEFAULT_ROOMS[0], name: 'Scriptorium', description: 'The Administrative Domain.', systemPromptOverride: state.scriptoriumConfig.systemPrompt } : isDungeonGen ? { ...DEFAULT_ROOMS[0], name: 'The Gauntlet', description: 'A table set in shadows.', systemPromptOverride: state.dungeonConfig.dmSystemPrompt } : getActiveRoom();
-        const currentOutfit = state.outfits.find(o => o.id === state.currentOutfitId);
-        let effectiveSystemPrompt = "";
-        if (isScriptoriumGen) { effectiveSystemPrompt = state.scriptoriumConfig.systemPrompt; } else if (isDungeonGen) { if (dungeonMode === 'dm') { effectiveSystemPrompt = state.dungeonConfig.dmSystemPrompt; } else { const persona = `\n[CURRENT DEMEANOR: ${state.dungeonConfig.ysaraithDemeanorInfo || state.dungeonConfig.ysaraithDemeanorLabel}]\n`; const base = compileCharacterSystemPrompt(activeChar); effectiveSystemPrompt = `${base}\n${YSARAITH_PLAYER_PROMPT_ADDENDUM}${persona}`; } } else { effectiveSystemPrompt = compileCharacterSystemPrompt(activeChar); effectiveSystemPrompt += `\n\n[CURRENT OUTFIT: ${currentOutfit?.name} - ${currentOutfit?.description}]`; }
-        if (effectiveSettings.roleplayIntensity !== undefined || effectiveSettings.writingStyle || effectiveSettings.formattingStyle) { effectiveSystemPrompt += `\n\n**STYLE MODIFIERS:**\n`; if (effectiveSettings.roleplayIntensity < 50) effectiveSystemPrompt += `- Adherence: Relaxed. Breaks in character are permissible for clarity.\n`; else effectiveSystemPrompt += `- Adherence: Strict (${effectiveSettings.roleplayIntensity}%). Total immersion.\n`; }
-        if (injectionPrompt) { effectiveSystemPrompt += `\n\n${injectionPrompt}\n`; }
-        const augmentedCharacter = { ...activeChar, systemPrompt: effectiveSystemPrompt };
-        const onChunk = (text: string) => { fullResponseText += text; setState(prev => ({ ...prev, threads: prev.threads.map(t => { if (t.id !== threadIdToUpdate) return t; const msgs = t.messages.map(m => { if (m.id === modelMsgId) { const newVersions = [...m.versions]; newVersions[m.activeVersionIndex] = fullResponseText; return { ...m, versions: newVersions, content: fullResponseText, speaker: (isDungeonGen ? (dungeonMode === 'dm' ? 'DM' : 'Ysaraith') : undefined) as Message['speaker'] }; } return m; }); return { ...t, messages: msgs }; }) })); };
-        if (effectiveSettings.activeProvider === 'gemini') { await streamGeminiResponse(messagesContext, room, effectiveSettings, augmentedCharacter, state.moodState, onChunk, abortControllerRef.current.signal, isScriptoriumGen ? state.scriptoriumConfig.tools : undefined); } else { await streamGrokResponse(messagesContext, room, effectiveSettings, augmentedCharacter, onChunk, abortControllerRef.current.signal); }
-        if (state.settings.oocAssistEnabled && !isScriptoriumGen && !isDungeonGen && !isRegeneration && !injectionPrompt) { setTimeout(() => { performAdvisoryGeneration(messagesContext, fullResponseText, threadIdToUpdate || STATIC_THREAD_ID); }, 1000); }
-    } catch (error: any) { console.error("Generation Error:", error); let errorMsg = `[System Error: ${error.message || 'Unknown Connection Failure'}]`; try { const raw = error.message || ''; const jsonMatch = raw.match(/"message":\s*"([^"]+)"/); if (jsonMatch && jsonMatch[1]) errorMsg = `[System Error: ${jsonMatch[1]}]`; } catch (e) {} setState(prev => ({ ...prev, threads: prev.threads.map(t => { if (t.id !== threadIdToUpdate) return t; const msgs = t.messages.map(m => { if (m.id === modelMsgId) { return { ...m, content: errorMsg, versions: [errorMsg] }; } return m; }); return { ...t, messages: msgs }; }) })); } finally { setIsStreaming(false); abortControllerRef.current = null; }
+      const result = await runGeneration(
+        {
+          messages: messagesContext,
+          character: activeChar,
+          settings: state.settings,
+          moodState: state.moodState,
+          room: getActiveRoom(),
+          outfit: currentOutfit,
+          scriptoriumConfig: state.scriptoriumConfig,
+          dungeonConfig: state.dungeonConfig,
+          mode,
+          injectionPrompt,
+          overrideSettings,
+          startText
+        },
+        onChunk,
+        abortControllerRef.current.signal
+      );
+
+      if (result.error) {
+        fullResponseText = result.fullText;
+        setState(prev => ({
+          ...prev,
+          threads: prev.threads.map(t => {
+            if (t.id !== threadIdToUpdate) return t;
+            const msgs = t.messages.map(m =>
+              m.id === modelMsgId
+                ? { ...m, content: result.fullText, versions: [result.fullText] }
+                : m
+            );
+            return { ...t, messages: msgs };
+          })
+        }));
+      } else {
+        fullResponseText = result.fullText;
+      }
+
+      if (
+        state.settings.oocAssistEnabled &&
+        !isScriptoriumGen &&
+        !isDungeonGen &&
+        !isRegeneration &&
+        !injectionPrompt &&
+        !result.aborted &&
+        !result.error
+      ) {
+        setTimeout(() => {
+          performAdvisoryGeneration(messagesContext, fullResponseText, threadIdToUpdate || STATIC_THREAD_ID);
+        }, 1000);
+      }
+    } catch (error: any) {
+      console.error('Generation Error:', error);
+      const errorMsg = formatGenerationError(error);
+      setState(prev => ({
+        ...prev,
+        threads: prev.threads.map(t => {
+          if (t.id !== threadIdToUpdate) return t;
+          const msgs = t.messages.map(m =>
+            m.id === modelMsgId ? { ...m, content: errorMsg, versions: [errorMsg] } : m
+          );
+          return { ...t, messages: msgs };
+        })
+      }));
+    } finally {
+      setIsStreaming(false);
+      abortControllerRef.current = null;
+    }
   };
 
   const performAdvisoryGeneration = async (context: Message[], lastResponse: string, threadId: string) => {
@@ -364,7 +426,7 @@ const App: React.FC = () => {
   };
 
   const performOOCGeneration = async (oocHistory: Message[], narrativeContext: Message[], targetThreadId: string) => {
-      setIsStreaming(true); abortControllerRef.current = new AbortController(); let fullResponseText = ""; const modelMsgId = uuidv4(); const updatedOOC = [...oocHistory, { id: modelMsgId, role: 'model', content: '', versions: [''], activeVersionIndex: 0, timestamp: Date.now() } as Message]; updateThreadOOC(targetThreadId, updatedOOC); let verbosityInstruction = ""; switch (state.settings.oocVerboseMode) { case 1: verbosityInstruction = "Be extremely concise."; break; case 3: verbosityInstruction = "Be verbose and detailed."; break; default: verbosityInstruction = "Maintain balanced length."; break; } let baseOocPrompt = OOC_SYSTEM_PROMPT; if (state.settings.oocPersona === 'character') { baseOocPrompt = `**MODE: METAGAMING (IN-CHARACTER)**\nIdentity: ${activeChar.name}.\nGoal: Discuss meta-topics in character.`; } const narrativeSummary = narrativeContext.slice(-5).map(m => `${m.role === 'model' ? activeChar.name : 'User'}: ${m.content}`).join('\n'); const systemPrompt = `${baseOocPrompt}\n**Constraint:** ${verbosityInstruction}\n[RECENT NARRATIVE]\n${narrativeSummary}`; const augmentedCharacter = { ...activeChar, systemPrompt }; const onChunk = (text: string) => { fullResponseText += text; setState(prev => ({ ...prev, threads: prev.threads.map(t => { if (t.id !== targetThreadId) return t; const newOOC = t.oocMessages?.map(m => { if (m.id === modelMsgId) return { ...m, content: fullResponseText }; return m; }); return { ...t, oocMessages: newOOC }; }) })); }; try { if (state.settings.activeProvider === 'gemini') { await streamGeminiResponse(updatedOOC, { ...DEFAULT_ROOMS[0], name: 'OOC Channel', description: 'Meta-space' }, state.settings, augmentedCharacter, state.moodState, onChunk, abortControllerRef.current.signal); } else { await streamGrokResponse(updatedOOC, { ...DEFAULT_ROOMS[0], name: 'OOC Channel', description: 'Meta-space' }, state.settings, augmentedCharacter, onChunk, abortControllerRef.current.signal); } } catch (e: any) { console.error("OOC Gen Failed", e); const errorMsg = `[Connection Error: ${e.message}]`; setState(prev => ({ ...prev, threads: prev.threads.map(t => { if (t.id !== targetThreadId) return t; const newOOC = t.oocMessages?.map(m => { if (m.id === modelMsgId) return { ...m, content: errorMsg }; return m; }); return { ...t, oocMessages: newOOC }; }) })); } finally { setIsStreaming(false); abortControllerRef.current = null; }
+      setIsStreaming(true); abortControllerRef.current = new AbortController(); let fullResponseText = ""; const modelMsgId = uuidv4(); const updatedOOC = [...oocHistory, { id: modelMsgId, role: 'model', content: '', versions: [''], activeVersionIndex: 0, timestamp: Date.now() } as Message]; updateThreadOOC(targetThreadId, updatedOOC); let verbosityInstruction = ""; switch (state.settings.oocVerboseMode) { case 1: verbosityInstruction = "Be extremely concise."; break; case 3: verbosityInstruction = "Be verbose and detailed."; break; default: verbosityInstruction = "Maintain balanced length."; break; } let baseOocPrompt = OOC_SYSTEM_PROMPT; if (state.settings.oocPersona === 'character') { baseOocPrompt = `**MODE: METAGAMING (IN-CHARACTER)**\nIdentity: ${activeChar.name}.\nGoal: Discuss meta-topics in character.`; } const narrativeSummary = narrativeContext.slice(-5).map(m => `${m.role === 'model' ? activeChar.name : 'User'}: ${m.content}`).join('\n'); const systemPrompt = `${baseOocPrompt}\n**Constraint:** ${verbosityInstruction}\n[RECENT NARRATIVE]\n${narrativeSummary}`; const augmentedCharacter = { ...activeChar, systemPrompt }; const onChunk = (text: string) => { fullResponseText += text; setState(prev => ({ ...prev, threads: prev.threads.map(t => { if (t.id !== targetThreadId) return t; const newOOC = t.oocMessages?.map(m => { if (m.id === modelMsgId) return { ...m, content: fullResponseText }; return m; }); return { ...t, oocMessages: newOOC }; }) })); }; try { if (state.settings.activeProvider === 'gemini') { await streamGeminiResponse(updatedOOC, { ...DEFAULT_ROOMS[0], name: 'OOC Channel', description: 'Meta-space' }, state.settings, augmentedCharacter, state.moodState, onChunk, abortControllerRef.current.signal); } else { await streamGrokResponse(updatedOOC, { ...DEFAULT_ROOMS[0], name: 'OOC Channel', description: 'Meta-space' }, state.settings, augmentedCharacter, onChunk, abortControllerRef.current.signal); } } catch (e: any) { console.error("OOC Gen Failed", e); const errorMsg = formatGenerationError(e); setState(prev => ({ ...prev, threads: prev.threads.map(t => { if (t.id !== targetThreadId) return t; const newOOC = t.oocMessages?.map(m => { if (m.id === modelMsgId) return { ...m, content: errorMsg }; return m; }); return { ...t, oocMessages: newOOC }; }) })); } finally { setIsStreaming(false); abortControllerRef.current = null; }
   };
 
   // --- STANDARD HANDLERS ---
@@ -449,7 +511,6 @@ const App: React.FC = () => {
         <TowerOfMirrors isOpen={state.isTowerOpen} onClose={() => setState(prev => ({ ...prev, isTowerOpen: false }))} settings={state.settings} onUpdateSettings={(newSettings) => setState(prev => ({ ...prev, settings: { ...prev.settings, ...newSettings } }))} character={activeChar} />
       )}
       
-      {/* --- NEW MODALS --- */}
       {viewingCharacter && (
           <CharacterSheetModal 
             character={viewingCharacter} 

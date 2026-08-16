@@ -5,6 +5,9 @@ export const STATIC_THREAD_ID = 'static_connection_main';
 export const SCRIPTORIUM_THREAD_ID = 'scriptorium_thread_v1';
 export const DUNGEON_THREAD_ID = 'dungeon_thread_gauntlet';
 
+/** Explicit schema version stamped into every persisted state object (see services/stateMigration.ts). */
+export const CURRENT_SCHEMA_VERSION = 7;
+
 export const DEFAULT_MAGIC_INPUT_SETTINGS: MagicInputSettings = {
     enabled: true,
     outputMode: 'roleplay',
@@ -236,5 +239,6 @@ export const DEFAULT_IMAGE_GEN_CONFIG: ImageGenConfig = {
     count: 1
 };
 
+/** Keep key name stable so existing user data continues to load. Schema version lives inside the object. */
 export const STORAGE_KEY = 'project_cerberus_state_v6';
 export const UI_STATE_KEY = 'project_cerberus_ui_v2';

@@ -23,7 +23,7 @@ import CharacterSheetModal from './components/CharacterSheetModal';
 import CharacterEditorModal from './components/CharacterEditorModal';
 import QuickPanel from './components/QuickPanel';
 import { TEMPLATES } from './data/templates';
-import { db } from './services/organizerDb';
+import { safeSecretsQuery } from './services/organizerDb';
 
 // Utility Hook for Intervals
 function useInterval(callback: () => void, delay: number | null) {
@@ -159,25 +159,22 @@ const App: React.FC = () => {
 
   const pushUIState = () => { try { /* Optional manual pushes */ } catch (e) {} };
 
-  // --- KEY CHECK ON BOOT ---
+  // --- KEY CHECK ON BOOT (Pass 1 hardened) ---
   useEffect(() => {
       const checkKeys = async () => {
-          // If keys are already in memory (e.g. from session persistence or hardcoded for dev), we are good
+          // If keys are already in memory we are good
           if (state.settings?.apiKeyGemini || state.settings?.apiKeyGrok) return;
 
           try {
-              if (!db || !db.secrets) throw new Error("DB Not Ready");
-              
-              const secrets = await db.secrets.toArray();
+              const secrets = await safeSecretsQuery();
               const hasEncrypted = secrets.some(s => s.mode === 'encrypted');
-              
+
               if (hasEncrypted) {
                   setKeyManagerMode('unlock');
               } else {
-                  // Check for plaintext keys to auto-load
                   const plaintextKeys: Partial<AppSettings> = {};
                   let foundPlain = false;
-                  
+
                   secrets.forEach(s => {
                       if (s.mode === 'plaintext' && s.value) {
                           if (s.id === 'gemini') plaintextKeys.apiKeyGemini = s.value;
@@ -194,7 +191,7 @@ const App: React.FC = () => {
                   }
               }
           } catch (e) {
-              console.error("Failed to check secrets DB:", e);
+              console.error('[Cerberus] Failed to check secrets DB:', e);
               setKeyManagerMode('onboarding');
           }
       };

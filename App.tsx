@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { Message, Room, CharacterProfile, AppSettings, Thread, ChatState, MoodState, DeepLogicConfig, AgentMode, ScriptoriumConfig, DungeonConfig, Outfit, ScheduleSettings, RuntimeSettings, MemoryPolicy, ToolSettings, WakeLog, QuickPreset } from './types';
 import { DEFAULT_PROFILE, DEFAULT_ROOMS, DEFAULT_SETTINGS, DEFAULT_MOOD_STATE, DEFAULT_DEEP_LOGIC, DEFAULT_OUTFITS, DEFAULT_SCHEDULE_SETTINGS, DEFAULT_SCRIPTORIUM_CONFIG, DEFAULT_DUNGEON_CONFIG, OOC_ADVISORY_SYSTEM_PROMPT, OOC_SYSTEM_PROMPT, YSARAITH_PLAYER_PROMPT_ADDENDUM, STATIC_THREAD_ID, SCRIPTORIUM_THREAD_ID, DUNGEON_THREAD_ID, EVENT_DELTAS, STORAGE_KEY, UI_STATE_KEY } from './constants';
+import { migratePersistedState, prepareStateForPersistence } from './services/stateMigration';
 import { compileCharacterSystemPrompt } from './services/promptCompiler';
 import { streamGeminiResponse } from './services/geminiService';
 import { streamGrokResponse } from './services/grokService';
@@ -64,149 +65,16 @@ const App: React.FC = () => {
       return <QuickPanel />;
   }
 
-  // --- STATE INITIALIZATION WITH PERSISTENCE ---
+  // --- STATE INITIALIZATION WITH PERSISTENCE (Pass 1 hardened) ---
   const [state, setState] = useState<ChatState>(() => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        
-        // 1. Ensure Character List & Sanitize
-        let characters: CharacterProfile[] = parsed.characters || [];
-        let activeCharacterId = parsed.activeCharacterId;
-
-        if (characters.length === 0) {
-            if (parsed.character) {
-                const legacyChar: CharacterProfile = {
-                    ...DEFAULT_PROFILE,
-                    ...parsed.character,
-                    id: 'legacy_ysaraith_v1',
-                    versionNumber: 1,
-                    isTemplate: false,
-                    lastUsedAt: Date.now()
-                };
-                characters.push(legacyChar);
-                activeCharacterId = legacyChar.id;
-            } else {
-                characters.push(DEFAULT_PROFILE);
-                activeCharacterId = DEFAULT_PROFILE.id;
-            }
-        }
-
-        // Deep sanitize characters
-        characters = characters.map(c => ({
-            ...c,
-            theme: { ...DEFAULT_PROFILE.theme, ...(c.theme || {}) },
-            constraints: c.constraints || DEFAULT_PROFILE.constraints,
-            capabilities: c.capabilities || DEFAULT_PROFILE.capabilities,
-            roles: c.roles || { taskAgent: false, narrativeTrustMode: false },
-            progression: c.progression || DEFAULT_PROFILE.progression,
-            portraitUrl: c.portraitUrl || DEFAULT_PROFILE.portraitUrl,
-            name: c.name || 'Unknown Entity'
-        }));
-
-        // Restore Threads
-        const migratedThreads = (parsed.threads || []).map((t: any) => ({
-            ...t,
-            characterId: t.characterId || activeCharacterId,
-            type: t.type || (t.id === STATIC_THREAD_ID ? 'static' : t.id === SCRIPTORIUM_THREAD_ID ? 'scriptorium' : t.id === DUNGEON_THREAD_ID ? 'dungeon' : 'ritual'),
-            messages: (t.messages || []).map((m: any) => ({
-                ...m,
-                versions: m.versions || [m.content],
-                activeVersionIndex: m.activeVersionIndex ?? 0
-            })),
-            oocMessages: t.oocMessages || [] 
-        }));
-
-        // Ensure system threads exist
-        const ensureThread = (id: string, type: any, title: string) => {
-            if (!migratedThreads.find((t: Thread) => t.id === id)) {
-                migratedThreads.push({ id, characterId: activeCharacterId, type, title, messages: [], oocMessages: [], lastUpdated: Date.now() });
-            }
-        };
-        ensureThread(STATIC_THREAD_ID, 'static', 'Static Connection');
-        ensureThread(SCRIPTORIUM_THREAD_ID, 'scriptorium', 'Ebon Scriptorium');
-        ensureThread(DUNGEON_THREAD_ID, 'dungeon', 'The Gauntlet');
-
-        const currentRooms = parsed.rooms || DEFAULT_ROOMS;
-        const cleanRooms = currentRooms.filter((r: Room) => r.id !== 'scriptorium');
-        DEFAULT_ROOMS.forEach(defRoom => { if (defRoom.id !== 'scriptorium' && !cleanRooms.find((r: Room) => r.id === defRoom.id)) cleanRooms.push(defRoom); });
-
-        const activeCharProfile = characters.find(c => c.id === activeCharacterId) || characters[0];
-
-        const sanitizedScriptorium = { 
-            ...DEFAULT_SCRIPTORIUM_CONFIG, 
-            ...(parsed.scriptoriumConfig || {}),
-            tools: { ...DEFAULT_SCRIPTORIUM_CONFIG.tools, ...(parsed.scriptoriumConfig?.tools || {}) }
-        };
-
-        const sanitizedDungeon = {
-            ...DEFAULT_DUNGEON_CONFIG,
-            ...(parsed.dungeonConfig || {})
-        };
-
-        return {
-           ...parsed,
-           threads: migratedThreads,
-           characters,
-           activeCharacterId: activeCharProfile.id,
-           character: activeCharProfile,
-           rooms: cleanRooms,
-           settings: { ...DEFAULT_SETTINGS, ...parsed.settings },
-           moodState: parsed.moodState || DEFAULT_MOOD_STATE,
-           deepLogic: parsed.deepLogic || DEFAULT_DEEP_LOGIC,
-           agentMode: parsed.agentMode || 'active',
-           lastInteractionTimestamp: parsed.lastInteractionTimestamp || Date.now(),
-           outfits: parsed.outfits || DEFAULT_OUTFITS,
-           currentOutfitId: parsed.currentOutfitId || DEFAULT_OUTFITS[0].id,
-           scheduledEvents: parsed.scheduledEvents || DEFAULT_SCHEDULE_SETTINGS,
-           isScriptoriumOpen: false,
-           scriptoriumConfig: sanitizedScriptorium,
-           isDungeonOpen: false,
-           dungeonConfig: sanitizedDungeon,
-           hasUnreadOOC: parsed.hasUnreadOOC || false,
-           isTowerOpen: false,
-           traceLogs: parsed.traceLogs || []
-        };
-      } catch (e) {
-        return getFreshInstallState();
-      }
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      return migratePersistedState(saved);
+    } catch (err) {
+      console.error('[Cerberus] Critical failure during state load – using fresh install.', err);
+      return migratePersistedState(null);
     }
-    return getFreshInstallState();
   });
-
-  function getFreshInstallState(): ChatState {
-    const initialCharId = 'legacy_ysaraith_v1';
-    const staticThread: Thread = { id: STATIC_THREAD_ID, characterId: initialCharId, type: 'static', title: 'Static Connection', messages: [], oocMessages: [], lastUpdated: Date.now() };
-    const scriptoriumThread: Thread = { id: SCRIPTORIUM_THREAD_ID, characterId: initialCharId, type: 'scriptorium', title: 'Ebon Scriptorium', messages: [], oocMessages: [], lastUpdated: Date.now() };
-    const dungeonThread: Thread = { id: DUNGEON_THREAD_ID, characterId: initialCharId, type: 'dungeon', title: 'The Gauntlet', messages: [], oocMessages: [], lastUpdated: Date.now() };
-    const initialThread: Thread = { id: uuidv4(), characterId: initialCharId, type: 'ritual', title: 'First Ritual', messages: [], oocMessages: [], lastUpdated: Date.now() };
-    
-    return {
-      threads: [staticThread, scriptoriumThread, dungeonThread, initialThread],
-      characters: [DEFAULT_PROFILE],
-      activeCharacterId: initialCharId,
-      activeThreadId: initialThread.id,
-      rooms: DEFAULT_ROOMS.filter(r => r.id !== 'scriptorium'),
-      activeRoomId: DEFAULT_ROOMS[0].id,
-      settings: DEFAULT_SETTINGS,
-      character: DEFAULT_PROFILE,
-      agentMode: 'active',
-      lastInteractionTimestamp: Date.now(),
-      moodState: DEFAULT_MOOD_STATE,
-      deepLogic: DEFAULT_DEEP_LOGIC,
-      outfits: DEFAULT_OUTFITS,
-      currentOutfitId: DEFAULT_OUTFITS[0].id,
-      scheduledEvents: DEFAULT_SCHEDULE_SETTINGS,
-      isScriptoriumOpen: false,
-      scriptoriumConfig: DEFAULT_SCRIPTORIUM_CONFIG,
-      isDungeonOpen: false,
-      dungeonConfig: DEFAULT_DUNGEON_CONFIG,
-      hasUnreadOOC: false,
-      isTowerOpen: false,
-      traceLogs: []
-    };
-  }
 
   // --- UI STATE ---
   const getPersistedUI = () => {
@@ -240,14 +108,14 @@ const App: React.FC = () => {
       localStorage.setItem(UI_STATE_KEY, JSON.stringify(currentUI));
   }, [isSidebarOpen, settingsModalState, isWardrobeOpen, isGalleryOpen]);
 
-  // --- DATA PERSISTENCE ---
+  // --- DATA PERSISTENCE (Pass 1 hardened) ---
   useEffect(() => {
-    // Save state but strip sensitive keys from settings before writing to LS
-    const stateToSave = {
-        ...state,
-        settings: { ...state.settings, apiKeyGemini: '', apiKeyGrok: '', apiKeyOpenAI: '' }
-    };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave));
+    try {
+      const stateToSave = prepareStateForPersistence(state);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave));
+    } catch (err) {
+      console.error('[Cerberus] Failed to persist state:', err);
+    }
   }, [state]);
 
   // --- BACK BUTTON GUARD ---

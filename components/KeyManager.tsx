@@ -12,6 +12,9 @@ interface KeyManagerProps {
     onClose?: () => void;
 }
 
+/** Keep only digits; max 8 chars. */
+const digitsOnly = (v: string) => v.replace(/\D/g, '').slice(0, 8);
+
 const KeyManager: React.FC<KeyManagerProps> = ({ mode, existingKeys, onKeysReady, onClose }) => {
     // Key State
     const [keys, setKeys] = useState({
@@ -139,20 +142,29 @@ const KeyManager: React.FC<KeyManagerProps> = ({ mode, existingKeys, onKeysReady
         }
     };
 
+    // Shared numeric PIN input attributes for mobile number pad
+    const pinInputProps = {
+        type: 'text' as const,
+        inputMode: 'numeric' as const,
+        pattern: '[0-9]*',
+        autoComplete: 'one-time-code',
+        maxLength: 8,
+    };
+
     // Render Unlock Screen
     if (mode === 'unlock') {
         return (
-            <div className="fixed inset-0 z-[200] bg-black/90 backdrop-blur-xl flex items-center justify-center p-4">
+            <div className="fixed inset-0 z-[200] bg-black/90 backdrop-blur-xl flex items-center justify-center p-4 overflow-hidden">
                 <div className="bg-cerberus-900 border border-cerberus-700 w-full max-w-sm rounded-lg p-8 text-center shadow-[0_0_50px_rgba(212,175,55,0.1)] animate-fadeIn">
                     <Lock size={48} className="mx-auto text-cerberus-accent mb-4" />
                     <h2 className="text-xl font-serif text-white tracking-widest mb-2">SECURITY CHECK</h2>
                     <p className="text-xs text-gray-500 mb-6">Enter PIN to decrypt your credentials.</p>
                     
                     <input 
-                        type="password"
+                        {...pinInputProps}
                         autoFocus
                         value={unlockPin}
-                        onChange={e => setUnlockPin(e.target.value)}
+                        onChange={e => setUnlockPin(digitsOnly(e.target.value))}
                         onKeyDown={e => e.key === 'Enter' && handleUnlock()}
                         className="bg-black border border-cerberus-800 text-center text-white text-2xl tracking-[0.5em] p-3 rounded w-full mb-4 focus:border-cerberus-accent focus:outline-none font-mono"
                         placeholder="••••"
@@ -174,16 +186,16 @@ const KeyManager: React.FC<KeyManagerProps> = ({ mode, existingKeys, onKeysReady
 
     // Render Setup/Settings Screen
     return (
-        <div className={`fixed inset-0 z-[150] bg-black/90 backdrop-blur-sm flex items-center justify-center p-4 ${mode === 'settings' ? '' : 'animate-fadeIn'}`}>
+        <div className={`fixed inset-0 z-[150] bg-black/90 backdrop-blur-sm flex items-center justify-center p-4 overflow-hidden ${mode === 'settings' ? '' : 'animate-fadeIn'}`}>
             <div className="bg-cerberus-900 border border-cerberus-700 w-full max-w-lg rounded-lg shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-                <div className="p-4 border-b border-cerberus-800 flex justify-between items-center bg-cerberus-950">
+                <div className="p-4 border-b border-cerberus-800 flex justify-between items-center bg-cerberus-950 shrink-0">
                     <h2 className="text-lg font-serif text-cerberus-accent tracking-widest flex items-center gap-2">
                         <Key size={18} /> API CREDENTIALS
                     </h2>
                     {onClose && <button onClick={onClose}><X size={20} className="text-gray-500 hover:text-white" /></button>}
                 </div>
 
-                <div className="p-6 overflow-y-auto custom-scrollbar space-y-6">
+                <div className="p-6 overflow-y-auto overscroll-contain custom-scrollbar space-y-6">
                     {/* Intro Text */}
                     {mode === 'onboarding' && (
                         <div className="bg-cerberus-800/20 border border-cerberus-800 p-4 rounded text-center">
@@ -203,6 +215,7 @@ const KeyManager: React.FC<KeyManagerProps> = ({ mode, existingKeys, onKeysReady
                                 onChange={e => setKeys({...keys, apiKeyGemini: e.target.value})}
                                 className="w-full bg-black border border-cerberus-800 rounded p-3 text-sm text-white focus:border-cerberus-accent focus:outline-none font-mono"
                                 placeholder="AIzaSy..."
+                                autoComplete="off"
                             />
                         </div>
                         <div className="relative">
@@ -213,6 +226,7 @@ const KeyManager: React.FC<KeyManagerProps> = ({ mode, existingKeys, onKeysReady
                                 onChange={e => setKeys({...keys, apiKeyGrok: e.target.value})}
                                 className="w-full bg-black border border-cerberus-800 rounded p-3 text-sm text-white focus:border-cerberus-accent focus:outline-none font-mono"
                                 placeholder="xai-..."
+                                autoComplete="off"
                             />
                         </div>
                         <div className="relative">
@@ -223,6 +237,7 @@ const KeyManager: React.FC<KeyManagerProps> = ({ mode, existingKeys, onKeysReady
                                 onChange={e => setKeys({...keys, apiKeyOpenAI: e.target.value})}
                                 className="w-full bg-black border border-cerberus-800 rounded p-3 text-sm text-white focus:border-cerberus-accent focus:outline-none font-mono"
                                 placeholder="sk-..."
+                                autoComplete="off"
                             />
                         </div>
                         <button onClick={() => setShowKeys(!showKeys)} className="text-xs text-gray-500 flex items-center gap-1 hover:text-white">
@@ -257,26 +272,24 @@ const KeyManager: React.FC<KeyManagerProps> = ({ mode, existingKeys, onKeysReady
                             </button>
                         </div>
 
-                        {/* PIN Entry (Only if Encrypted) */}
+                        {/* PIN Entry (Only if Encrypted) – equal columns for alignment */}
                         {storageMode === 'encrypted' && (
                             <div className="animate-fadeIn bg-cerberus-900/50 p-4 rounded border border-cerberus-800 text-center">
                                 <label className="block text-[10px] uppercase text-cerberus-accent font-bold mb-3 tracking-widest">Set Security PIN</label>
-                                <div className="flex gap-3">
+                                <div className="grid grid-cols-2 gap-3">
                                     <input 
-                                        type="password" 
+                                        {...pinInputProps}
                                         value={pin}
-                                        onChange={e => setPin(e.target.value)}
-                                        className="flex-1 bg-black border border-cerberus-700 rounded p-3 text-center text-white font-mono tracking-widest text-sm focus:border-cerberus-accent outline-none placeholder-gray-600 transition-all"
+                                        onChange={e => setPin(digitsOnly(e.target.value))}
+                                        className="w-full min-w-0 bg-black border border-cerberus-700 rounded p-3 text-center text-white font-mono tracking-widest text-sm focus:border-cerberus-accent outline-none placeholder-gray-600 transition-all"
                                         placeholder="PIN"
-                                        maxLength={8}
                                     />
                                     <input 
-                                        type="password" 
+                                        {...pinInputProps}
                                         value={pinConfirm}
-                                        onChange={e => setPinConfirm(e.target.value)}
-                                        className="flex-1 bg-black border border-cerberus-700 rounded p-3 text-center text-white font-mono tracking-widest text-sm focus:border-cerberus-accent outline-none placeholder-gray-600 transition-all"
+                                        onChange={e => setPinConfirm(digitsOnly(e.target.value))}
+                                        className="w-full min-w-0 bg-black border border-cerberus-700 rounded p-3 text-center text-white font-mono tracking-widest text-sm focus:border-cerberus-accent outline-none placeholder-gray-600 transition-all"
                                         placeholder="CONFIRM"
-                                        maxLength={8}
                                     />
                                 </div>
                                 <p className="text-[9px] text-gray-500 mt-3 mx-auto max-w-xs leading-relaxed">PIN is required to decrypt keys on next visit. If lost, data is unrecoverable.</p>
@@ -294,7 +307,7 @@ const KeyManager: React.FC<KeyManagerProps> = ({ mode, existingKeys, onKeysReady
                     </div>
                 </div>
 
-                <div className="p-4 border-t border-cerberus-800 bg-cerberus-950 flex flex-col gap-2">
+                <div className="p-4 border-t border-cerberus-800 bg-cerberus-950 flex flex-col gap-2 shrink-0">
                     {errorMsg && <div className="text-red-500 text-xs text-center flex items-center justify-center gap-2 bg-red-900/20 p-2 rounded"><AlertCircle size={14}/> {errorMsg}</div>}
                     <button 
                         onClick={handleSave}

@@ -14,58 +14,98 @@ export class OrganizerDB extends Dexie {
 
     constructor() {
         super('OrganizerDB');
-        
-        try {
-            // Version 12: Secrets update
-            // @ts-ignore
-            this.version(12).stores({
-                tasks: '++id, status, dueAt, listId, priority, [status+dueAt]',
-                events: '++id, startAt, endAt, [startAt+endAt]',
-                notes: 'id, type, title, pinned, archived, notebookId, *tags, remindAt, updatedAt, [pinned+updatedAt]',
-                notebooks: 'id, name, updatedAt',
-                lists: '++id, name, sortOrder',
-                tags: '++id, name',
-                assistant_messages: '++id, role, createdAt, mode',
-                planning_context: 'id',
-                outbox: '++id, timestamp, synced',
-                archived_items: 'id, originalTable, archivedAt',
-                quick_presets: 'id',
-                secrets: 'id, provider, mode',
-                characters: 'id, templateId, lastUsedAt'
-            });
 
-        } catch (e) {
-            console.error("Dexie Schema Definition Error:", e);
-        }
+        // Version 12: Secrets update
+        this.version(12).stores({
+            tasks: '++id, status, dueAt, listId, priority, [status+dueAt]',
+            events: '++id, startAt, endAt, [startAt+endAt]',
+            notes: 'id, type, title, pinned, archived, notebookId, *tags, remindAt, updatedAt, [pinned+updatedAt]',
+            notebooks: 'id, name, updatedAt',
+            lists: '++id, name, sortOrder',
+            tags: '++id, name',
+            assistant_messages: '++id, role, createdAt, mode',
+            planning_context: 'id',
+            outbox: '++id, timestamp, synced',
+            archived_items: 'id, originalTable, archivedAt',
+            quick_presets: 'id',
+            secrets: 'id, provider, mode',
+            characters: 'id, templateId, lastUsedAt'
+        });
     }
 }
 
 export const db = new OrganizerDB();
 
-export const initializeOrganizer = async () => {
-    // Seeding if empty
-    if ((await db.quick_presets.count()) === 0) {
-        await db.quick_presets.add({
-            id: 'default',
-            name: 'Standard Dashboard',
-            layout: [
-                { id: 'mic', type: 'mic' },
-                { id: 'today', type: 'today_list' },
-                { id: 'next', type: 'next_event' }
-            ],
-            createdAt: Date.now(),
-            updatedAt: Date.now()
-        });
+/**
+ * Wait until Dexie is open and the secrets table is queryable.
+ * Returns true on success, false after timeout / failure.
+ */
+export async function ensureDbReady(timeoutMs = 4000): Promise<boolean> {
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+        try {
+            // Force open if needed
+            if (!db.isOpen()) {
+                await db.open();
+            }
+            // Light probe – secrets table must be readable
+            await db.secrets.limit(1).toArray();
+            return true;
+        } catch (err) {
+            console.warn('[Cerberus DB] Not ready yet, retrying…', err);
+            await new Promise(r => setTimeout(r, 250));
+        }
     }
-    
-    if ((await db.planning_context.count()) === 0) {
-        await db.planning_context.put({
-            id: 'default',
-            workHours: '09:00-17:00',
-            sleepWindow: '23:00-07:00',
-            preferences: 'Avoid meetings on Friday afternoons.',
-            privacy: { allowTasks: true, allowCalendar: true }
-        });
+
+    console.error('[Cerberus DB] ensureDbReady timed out');
+    return false;
+}
+
+/**
+ * Safe secrets read used by the boot path.
+ * Never throws – returns empty array on any failure.
+ */
+export async function safeSecretsQuery(): Promise<StoredSecret[]> {
+    try {
+        const ready = await ensureDbReady();
+        if (!ready) return [];
+        return await db.secrets.toArray();
+    } catch (err) {
+        console.error('[Cerberus DB] safeSecretsQuery failed:', err);
+        return [];
+    }
+}
+
+export const initializeOrganizer = async () => {
+    try {
+        await ensureDbReady();
+
+        if ((await db.quick_presets.count()) === 0) {
+            await db.quick_presets.add({
+                id: 'default',
+                name: 'Standard Dashboard',
+                layout: [
+                    { id: 'mic', type: 'mic' },
+                    { id: 'today', type: 'today_list' },
+                    { id: 'next', type: 'next_event' }
+                ],
+                createdAt: Date.now(),
+                updatedAt: Date.now()
+            });
+        }
+
+        if ((await db.planning_context.count()) === 0) {
+            await db.planning_context.put({
+                id: 'default',
+                workHours: '09:00-17:00',
+                sleepWindow: '23:00-07:00',
+                preferences: 'Avoid meetings on Friday afternoons.',
+                privacy: { allowTasks: true, allowCalendar: true }
+            });
+        }
+    } catch (err) {
+        console.error('[Cerberus DB] initializeOrganizer failed:', err);
     }
 };
 
@@ -106,9 +146,8 @@ export const requestPersistentStorage = async () => {
 export const archiveOldTasks = async (monthsOld: number) => {
     const cutoff = Date.now() - (monthsOld * 30 * 24 * 60 * 60 * 1000);
     const oldTasks = await db.tasks.where('status').equals('done').filter(t => t.updatedAt < cutoff).toArray();
-    
+
     if (oldTasks.length > 0) {
-        // Here we could move them to an 'archived_items' table if implemented
         await db.tasks.bulkDelete(oldTasks.map(t => t.id));
     }
 };

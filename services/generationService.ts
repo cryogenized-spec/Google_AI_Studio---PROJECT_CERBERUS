@@ -39,6 +39,8 @@ export interface GenerationContext {
   mode: GenerationMode;
   injectionPrompt?: string;
   overrideSettings?: Partial<AppSettings>;
+  /** Optional prefix already shown (e.g. continue-generation). */
+  startText?: string;
 }
 
 export interface GenerationResult {
@@ -134,7 +136,6 @@ export function formatGenerationError(error: unknown): string {
 
   const raw = (error as any)?.message || String(error);
 
-  // Try to extract nested JSON message if present
   try {
     const jsonMatch = raw.match(/"message"\s*:\s*"([^"]+)"/);
     if (jsonMatch?.[1]) {
@@ -152,8 +153,22 @@ export function formatGenerationError(error: unknown): string {
 }
 
 /**
+ * Resolve GenerationMode from thread type + optional dungeon role.
+ */
+export function resolveGenerationMode(
+  threadType: string | undefined,
+  dungeonMode?: 'dm' | 'player'
+): GenerationMode {
+  if (threadType === 'scriptorium') return 'scriptorium';
+  if (threadType === 'dungeon') {
+    return dungeonMode === 'dm' ? 'dungeon-dm' : 'dungeon-player';
+  }
+  return 'ritual';
+}
+
+/**
  * Unified streaming entry point.
- * Returns the full accumulated text (or error marker).
+ * Providers already return full accumulated text; onChunk receives deltas only.
  */
 export async function runGeneration(
   ctx: GenerationContext,
@@ -171,52 +186,41 @@ export async function runGeneration(
     systemPrompt
   };
   const room = resolveRoom(ctx);
-
-  let fullText = '';
-  let aborted = false;
+  const prefix = ctx.startText || '';
 
   try {
+    let streamed = '';
+
     if (effectiveSettings.activeProvider === 'gemini') {
       const tools: ScriptoriumTools | undefined =
         ctx.mode === 'scriptorium' ? ctx.scriptoriumConfig?.tools : undefined;
 
-      fullText = await streamGeminiResponse(
+      streamed = await streamGeminiResponse(
         ctx.messages,
         room,
         effectiveSettings,
         augmentedCharacter,
         ctx.moodState,
-        (chunk) => {
-          fullText += chunk; // streamGemini already accumulates in some paths; keep local too
-          onChunk(chunk);
-        },
+        onChunk,
         signal,
         tools
       );
     } else {
-      fullText = await streamGrokResponse(
+      streamed = await streamGrokResponse(
         ctx.messages,
         room,
         effectiveSettings,
         augmentedCharacter,
-        (chunk) => {
-          fullText += chunk;
-          onChunk(chunk);
-        },
+        onChunk,
         signal
       );
     }
 
-    // Some providers return the full text; ensure we have something
-    if (!fullText) {
-      fullText = ' [Silence. The connection flickers.]';
-    }
-
+    const fullText = prefix + (streamed || ' [Silence. The connection flickers.]');
     return { fullText, aborted: false };
   } catch (err) {
     if (signal?.aborted || (err as any)?.name === 'AbortError') {
-      aborted = true;
-      return { fullText: fullText || '[Ritual Interrupted]', aborted: true };
+      return { fullText: prefix || '[Ritual Interrupted]', aborted: true };
     }
     const errorMsg = formatGenerationError(err);
     return { fullText: errorMsg, aborted: false, error: errorMsg };
